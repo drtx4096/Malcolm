@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2025 Battelle Energy Alliance, LLC.  All rights reserved.
+# Copyright (c) 2026 Battelle Energy Alliance, LLC.  All rights reserved.
 
 # Configure Amazon Linux 2023 and install Malcolm
 
@@ -32,7 +32,7 @@ fi
 # -u UID      (user UID, e.g., 1000)
 VERBOSE_FLAG=
 MALCOLM_REPO=${MALCOLM_REPO:-idaholab/Malcolm}
-MALCOLM_TAG=${MALCOLM_TAG:-v25.09.0}
+MALCOLM_TAG=${MALCOLM_TAG:-v26.02.0}
 [[ -z "$MALCOLM_UID" ]] && ( [[ $EUID -eq 0 ]] && MALCOLM_UID=1000 || MALCOLM_UID="$(id -u)" )
 while getopts 'vr:t:u:' OPTION; do
   case "$OPTION" in
@@ -114,9 +114,9 @@ function InstallPythonPackages {
         python3-requests+security
 
     $SUDO_CMD /usr/bin/python3 -m pip install $USERFLAG -U \
-        dateparser==1.2.1 \
-        kubernetes==32.0.1 \
-        python-dotenv==1.1.0 \
+        dateparser==1.2.2 \
+        kubernetes==34.1.0 \
+        python-dotenv==1.2.1 \
         pythondialog==3.5.3
 }
 
@@ -173,25 +173,28 @@ function SystemConfig {
 kernel.dmesg_restrict=0
 
 # the maximum number of open file handles
-fs.file-max=518144
+fs.file-max=2097152
 
 # the maximum number of user inotify watches
 fs.inotify.max_user_watches=131072
 
-# the maximum number of memory map areas a process may have
-vm.max_map_count=262144
-
 # the maximum number of incoming connections
 net.core.somaxconn=65535
+
+# the maximum number of memory map areas a process may have
+vm.max_map_count=524288
 
 # decrease "swappiness" (swapping out runtime memory vs. dropping pages)
 vm.swappiness=1
 
 # the % of system memory fillable with "dirty" pages before flushing
-vm.dirty_background_ratio=40
+vm.dirty_background_ratio=5
 
 # maximum % of dirty system memory before committing everything
-vm.dirty_ratio=80
+vm.dirty_ratio=10
+
+# virtual memory accounting mode: always overcommit, never check
+vm.overcommit_memory=1
 EOT
     fi # sysctl check
 
@@ -228,62 +231,114 @@ function _GitLatestRelease {
 }
 
 ################################################################################
-# _InstallCroc - schollz/croc: easily and securely send things from one computer to another
+# _InstallTool - generalized GitHub binary installer
+# Usage:
+#   _InstallTool <repo> <binary_name> <asset_pattern_amd64> <asset_pattern_arm64> [--strip N]
+#
+# Examples:
+#   _InstallTool schollz/croc croc \
+#     "croc_{ver}_Linux-64bit.tar.gz" "croc_{ver}_Linux-ARM64.tar.gz" --strip 0
+#
+#   _InstallTool mikefarah/yq yq \
+#     "yq_linux_amd64" "yq_linux_arm64"
+################################################################################
+function _InstallTool {
+  local repo="$1"
+  local bin_name="$2"
+  local amd64_pattern="$3"
+  local arm64_pattern="$4"
+  local strip_components=1
+
+  shift 4
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --strip) strip_components="$2"; shift ;;
+    esac
+    shift
+  done
+
+  local release="$(_GitLatestRelease "$repo")"
+  local dest_dir=/usr/bin
+  $SUDO_CMD mkdir -p "$dest_dir"
+  local tmp_dir="$(mktemp -d)"
+
+  local linux_cpu="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+  local arch_pattern=""
+  case "$linux_cpu" in
+    amd64) arch_pattern="$amd64_pattern" ;;
+    arm64) arch_pattern="$arm64_pattern" ;;
+    *) echo "Unsupported architecture: $linux_cpu" >&2; return 1 ;;
+  esac
+
+  arch_pattern="${arch_pattern//\{ver\}/$release}"
+  local url="https://github.com/${repo}/releases/download/${release}/${arch_pattern}"
+
+  # Default binary name = repo basename if omitted or '-'
+  if [[ -z "$bin_name" || "$bin_name" == "-" ]]; then
+    bin_name="$(basename "$repo")"
+  fi
+
+  echo "Installing $bin_name from $url" >&2
+
+  local is_tarball=false
+  [[ "$arch_pattern" =~ \.tar\.gz$|\.tgz$ ]] && is_tarball=true
+
+  if $is_tarball; then
+    if [[ "$strip_components" -eq 0 ]]; then
+      curl -sSL "$url" | tar xzf - -C "$tmp_dir"
+    else
+      curl -sSL "$url" | tar xzf - --strip-components "$strip_components" -C "$tmp_dir"
+    fi
+
+    # Try to locate binary
+    local found_bin
+    found_bin="$(find "$tmp_dir" -type f -executable \( -name "$bin_name" -o -printf "%f\n" \) 2>/dev/null | head -n1)"
+    if [[ -z "$found_bin" ]]; then
+      # fallback: just grab first executable file
+      found_bin="$(find "$tmp_dir" -type f -perm -111 | head -n1)"
+    fi
+    if [[ -z "$found_bin" ]]; then
+      echo "Error: could not detect binary in tarball" >&2
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+
+    $SUDO_CMD cp -f "$found_bin" "$dest_dir/$bin_name"
+  else
+    $SUDO_CMD curl -sSL -o "$dest_dir/$bin_name" "$url"
+  fi
+
+  $SUDO_CMD chmod 755 "$dest_dir/$bin_name"
+  $SUDO_CMD chown root:root "$dest_dir/$bin_name"
+  rm -rf "$tmp_dir"
+}
+
 function _InstallCroc {
-  CROC_RELEASE="$(_GitLatestRelease schollz/croc)"
-  TMP_CLONE_DIR="$(mktemp -d)"
-  if [[ "$LINUX_CPU" == "arm64" ]]; then
-    CROC_URL="https://github.com/schollz/croc/releases/download/${CROC_RELEASE}/croc_${CROC_RELEASE}_Linux-ARM64.tar.gz"
-  elif [[ "$LINUX_CPU" == "amd64" ]]; then
-    CROC_URL="https://github.com/schollz/croc/releases/download/${CROC_RELEASE}/croc_${CROC_RELEASE}_Linux-64bit.tar.gz"
-  else
-    CROC_URL=
-  fi
-  if [[ -n "$CROC_URL" ]]; then
-    curl -sSL "$CROC_URL" | tar xvzf - -C "${TMP_CLONE_DIR}"
-    $SUDO_CMD cp -f "${TMP_CLONE_DIR}"/croc /usr/bin/croc
-    $SUDO_CMD chmod 755 /usr/bin/croc
-    $SUDO_CMD chown root:root /usr/bin/croc
-  fi
-  rm -rf "$TMP_CLONE_DIR"
+  _InstallTool schollz/croc - \
+    "croc_{ver}_Linux-64bit.tar.gz" \
+    "croc_{ver}_Linux-ARM64.tar.gz" --strip 0
 }
-
-################################################################################
-# _InstallYQ - mikefarah/yq: YAML command-line utility
 function _InstallYQ {
-  YQ_RELEASE="$(_GitLatestRelease mikefarah/yq)"
-  if [[ "$LINUX_CPU" == "arm64" ]]; then
-    YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_RELEASE}/yq_linux_arm64"
-  elif [[ "$LINUX_CPU" == "amd64" ]]; then
-    YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_RELEASE}/yq_linux_amd64"
-  else
-    YQ_URL=
-  fi
-  if [[ -n "$YQ_URL" ]]; then
-    $SUDO_CMD curl -sSL -o /usr/bin/yq "$YQ_URL"
-    $SUDO_CMD chmod 755 /usr/bin/yq
-    $SUDO_CMD chown root:root /usr/bin/yq
-  fi
+  _InstallTool mikefarah/yq - \
+    "yq_linux_amd64" "yq_linux_arm64"
 }
 
-################################################################################
-# _InstallBoringProxy - boringproxy/boringproxy: a reverse proxy and tunnel manager
 function _InstallBoringProxy {
-  BORING_RELEASE="$(_GitLatestRelease boringproxy/boringproxy)"
-  if [[ "$LINUX_CPU" == "arm64" ]]; then
-    BORING_URL="https://github.com/boringproxy/boringproxy/releases/download/${BORING_RELEASE}/boringproxy-linux-arm64"
-  elif [[ "$LINUX_CPU" == "amd64" ]]; then
-    BORING_URL="https://github.com/boringproxy/boringproxy/releases/download/${BORING_RELEASE}/boringproxy-linux-x86_64"
-  else
-    BORING_URL=
-  fi
-  if [[ -n "$BORING_URL" ]]; then
-    curl -sSL -o "${LOCAL_BIN_PATH}"/boringproxy.new "$BORING_URL"
-    chmod 755 "${LOCAL_BIN_PATH}"/boringproxy.new
-    [[ -f "$LOCAL_BIN_PATH"/boringproxy ]] && $SuDO_CMD rm -f /usr/bin/boringproxy
-    $SUDO_CMD mv "$LOCAL_BIN_PATH"/boringproxy.new /usr/bin/boringproxy
-    $SUDO_CMD chown root:root /usr/bin/boringproxy
-  fi
+  _InstallTool boringproxy/boringproxy - \
+    "boringproxy-linux-x86_64" "boringproxy-linux-arm64"
+}
+
+function _InstallBat {
+  _InstallTool sharkdp/bat - \
+    "bat-{ver}-x86_64-unknown-linux-musl.tar.gz" \
+    "bat-{ver}-aarch64-unknown-linux-musl.tar.gz" --strip 1
+  $SUDO_CMD ln -s -r /usr/bin/bat /usr/bin/batcat
+}
+
+function _InstallEza {
+  _InstallTool eza-community/eza - \
+    "eza_x86_64-unknown-linux-musl.tar.gz" \
+    "eza_aarch64-unknown-linux-gnu_no_libgit.tar.gz" --strip 1
 }
 
 ################################################################################
@@ -292,6 +347,8 @@ function InstallUserLocalBinaries {
     [[ ! -f /usr/bin/croc ]] && _InstallCroc
     [[ ! -f /usr/bin/yq ]] && _InstallYQ
     [[ ! -f /usr/bin/boringproxy ]] && _InstallBoringProxy
+    [[ ! -f /usr/bin/bat ]] && _InstallBat
+    [[ ! -f /usr/bin/exa ]] && _InstallEza
 }
 
 ################################################################################
@@ -336,7 +393,7 @@ function InstallMalcolm {
 # Configure Malcolm on first login
 if [[ $- == *i* ]] && [[ -d ~/Malcolm ]] &&  [[ ! -f ~/Malcolm/.configured ]]; then
     pushd ~/Malcolm >/dev/null 2>&1
-    ./scripts/configure
+    ./scripts/install.py --configure
     ./scripts/auth_setup
     popd >/dev/null 2>&1
     clear

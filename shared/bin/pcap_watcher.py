@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2025 Battelle Energy Alliance, LLC.  All rights reserved.
+# Copyright (c) 2026 Battelle Energy Alliance, LLC.  All rights reserved.
 
 ###################################################################################################
 # Monitor a directory for PCAP files for processing (by publishing their filenames to a ZMQ socket)
@@ -40,9 +40,11 @@ from malcolm_utils import (
     ParseCurlFile,
     remove_prefix,
     set_logging,
+    sizeof_fmt,
     get_verbosity_env_var_count,
     touch,
 )
+from malcolm_constants import DatabaseMode
 import watch_common
 
 from collections import defaultdict
@@ -56,8 +58,11 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.utils import WatchdogShutdownError
 
 ###################################################################################################
-MINIMUM_CHECKED_FILE_SIZE_DEFAULT = 24
-MAXIMUM_CHECKED_FILE_SIZE_DEFAULT = 32 * 1024 * 1024 * 1024
+MINIMUM_CHECKED_FILE_SIZE_DEFAULT_BYTES = 24
+try:
+    MAXIMUM_CHECKED_FILE_SIZE_DEFAULT_BYTES = int(os.getenv('PCAP_UPLOAD_MAX_FILE_GB', '50')) * 1024 * 1024 * 1024
+except:
+    MAXIMUM_CHECKED_FILE_SIZE_DEFAULT_BYTES = 50 * 1024 * 1024 * 1024
 
 ###################################################################################################
 # for querying the Arkime's "arkime_files" OpenSearch index to avoid re-processing (duplicating sessions for)
@@ -212,7 +217,7 @@ class EventWatcher:
                 if self.useOpenSearch:
                     s = (
                         SearchClass(using=self.openSearchClient, index=ARKIME_FILES_INDEX)
-                        .filter("term", node=args.nodeName)
+                        .filter("regexp", node=fr"{args.nodeName}(-upload)?")
                         .query("wildcard", name=f"*{os.path.sep}{relativePath}")
                     )
                     response = s.execute()
@@ -248,7 +253,9 @@ class EventWatcher:
 
             else:
                 # too small/big to care about, or the wrong type, ignore it
-                self.logger.info(f"{scriptName}:\t✋\t{pathname}")
+                self.logger.error(
+                    f"{scriptName}:\t✋\t{pathname} ({sizeof_fmt(fileSize)}, {fileMime}, {fileType}) invalid file type or unacceptable file size, ignoring"
+                )
 
 
 def file_processor(pathname, **kwargs):
@@ -297,16 +304,16 @@ def main():
         help="Minimum size for checked files",
         metavar='<bytes>',
         type=int,
-        default=MINIMUM_CHECKED_FILE_SIZE_DEFAULT,
+        default=MINIMUM_CHECKED_FILE_SIZE_DEFAULT_BYTES,
         required=False,
     )
     parser.add_argument(
         '--max-bytes',
         dest='maxBytes',
-        help="Maximum size for checked files",
+        help="Maximum size for checked files, in bytes",
         metavar='<bytes>',
         type=int,
-        default=MAXIMUM_CHECKED_FILE_SIZE_DEFAULT,
+        default=MAXIMUM_CHECKED_FILE_SIZE_DEFAULT_BYTES,
         required=False,
     )
     parser.add_argument(
@@ -344,7 +351,7 @@ def main():
         default=malcolm_utils.DatabaseModeStrToEnum(
             os.getenv(
                 'OPENSEARCH_PRIMARY',
-                default=malcolm_utils.DatabaseModeEnumToStr(malcolm_utils.DatabaseMode.OpenSearchLocal),
+                default=malcolm_utils.DatabaseModeEnumToStr(DatabaseMode.OpenSearchLocal),
             )
         ),
         required=False,
@@ -455,7 +462,7 @@ def main():
     logging.debug(f"Arguments: {sys.argv[1:]}")
     logging.debug(f"Arguments: {args}")
 
-    opensearchIsLocal = (args.opensearchMode == malcolm_utils.DatabaseMode.OpenSearchLocal) or (
+    opensearchIsLocal = (args.opensearchMode == DatabaseMode.OpenSearchLocal) or (
         args.opensearchUrl == 'https://opensearch:9200'
     )
     opensearchCreds = ParseCurlFile(args.opensearchCurlRcFile)
@@ -467,7 +474,7 @@ def main():
             args.opensearchUrl = opensearchCreds['url']
 
     DatabaseInitArgs = {}
-    if args.opensearchMode == malcolm_utils.DatabaseMode.ElasticsearchRemote:
+    if args.opensearchMode == DatabaseMode.ElasticsearchRemote:
         from elasticsearch import Elasticsearch as DatabaseClass
         from elasticsearch_dsl import Search as SearchClass
         from elasticsearch.exceptions import ConnectionError, ConnectionTimeout, AuthenticationException

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2025 Battelle Energy Alliance, LLC.  All rights reserved.
+# Copyright (c) 2026 Battelle Energy Alliance, LLC.  All rights reserved.
 
 import sys
 
@@ -17,6 +17,7 @@ import gzip
 import json
 import logging
 import os
+from pathlib import Path
 import platform
 import re
 import secrets
@@ -28,51 +29,85 @@ import tarfile
 import tempfile
 import time
 
+# Add the project root directory to the Python path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from malcolm_constants import (
+    CONTAINER_RUNTIME_KEY,
+    PROFILE_HEDGEHOG,
+    PROFILE_KEY,
+    PROFILE_MALCOLM,
+    PLATFORM_WINDOWS,
+    SERVICE_PORT_HEDGEHOG_PROFILE_ARKIME_VIEWER,
+    SERVICE_PORT_HEDGEHOG_PROFILE_EXTRACTED_FILES,
+    COMPOSE_MALCOLM_EXTENSION,
+    COMPOSE_MALCOLM_EXTENSION_HEDGEHOG,
+    COMPOSE_MALCOLM_EXTENSION_HEDGEHOG_REACHBACK_REQUEST_ACL,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_AIDE,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_AUDITLOG,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_CPU,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_DF,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_DISK,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_KMSG,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_MEM,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_NETWORK,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_SYSTEMD,
+    COMPOSE_MALCOLM_EXTENSION_AUX_FW_THERMAL,
+    COMPOSE_MALCOLM_EXTENSION_PRUNE,
+    COMPOSE_MALCOLM_EXTENSION_PRUNE_PCAP,
+    COMPOSE_MALCOLM_EXTENSION_PRUNE_LOGS,
+)
+
 from malcolm_common import (
     AskForPassword,
     AskForString,
+    AskForStrings,
     BoundPath,
     ChooseOne,
     ClearScreen,
-    CONTAINER_RUNTIME_KEY,
     DetermineYamlFileFormat,
     DisplayMessage,
     DisplayProgramBox,
     DotEnvDynamic,
     EnvValue,
+    GetExposedPorts,
+    GetMalcolmPath,
     GetUidGidFromEnv,
     KubernetesDynamic,
     LocalPathForContainerBindMount,
     MainDialog,
     MalcolmAuthFilesExist,
-    GetMalcolmPath,
     MalcolmTmpPath,
     OrchestrationFramework,
     OrchestrationFrameworksSupported,
-    PLATFORM_WINDOWS,
     posInt,
     ProcessLogLine,
-    PROFILE_HEDGEHOG,
-    PROFILE_KEY,
-    PROFILE_MALCOLM,
     ScriptPath,
+    test_http_connection,
     UpdateEnvFiles,
     UserInputDefaultsBehavior,
     YAMLDynamic,
     YesOrNo,
+    SYSTEM_INFO,
 )
 
 from malcolm_utils import (
     CountUntilException,
     deep_get,
     dictsearch,
-    flatten,
     EscapeAnsi,
     EscapeForCurl,
+    flatten,
     get_iterable,
     get_primary_ip,
+    get_verbosity_env_var_count,
     LoadStrIfJson,
     log_level_is_debug,
+    openssl_self_signed_keygen,
     ParseCurlFile,
     pushd,
     RemoveEmptyFolders,
@@ -80,7 +115,6 @@ from malcolm_utils import (
     run_process,
     same_file_or_dir,
     set_logging,
-    get_verbosity_env_var_count,
     str2bool,
     touch,
     which,
@@ -169,7 +203,7 @@ def checkEnvFilesAndValues():
     global dotenvImported
     global yamlImported
 
-    # if a specific config/*.env file doesn't exist, use the *.example.env files as defaults
+    # if a specific config/*.env file doesn't exist, use the *.env.example files as defaults
     if os.path.isdir(examplesConfigDir := os.path.join(GetMalcolmPath(), 'config')):
 
         # process renames, copies, removes, etc. from env-var-actions.yml
@@ -429,6 +463,112 @@ def checkWiseFile():
         shutil.copyfile(wiseExampleFile, wiseFile)
 
 
+def getNginxAuthMethod():
+    global args
+    global dotenvImported
+
+    authCommonEnvFile = os.path.join(args.configDir, 'auth-common.env')
+    if args.authMode:
+        nginxAuthMode = str(args.authMode).lower()
+    else:
+        nginxAuthMode = 'unknown'
+        if os.path.isfile(authCommonEnvFile):
+            nginxAuthMode = str(
+                dotenvImported.dotenv_values(authCommonEnvFile).get('NGINX_AUTH_MODE', nginxAuthMode)
+            ).lower()
+
+    return nginxAuthMode
+
+
+def malcolm_iso_services_op(start):
+    global args
+    global orchMode
+    global dockerComposeYaml
+    global dotenvImported
+
+    ext_service_map = {
+        COMPOSE_MALCOLM_EXTENSION_AUX_FW: {
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_AIDE: ['aide-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_AUDITLOG: ['auditlog-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_CPU: ['cpu-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_DF: ['df-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_DISK: ['disk-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_KMSG: ['kmsg-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_MEM: ['mem-malcolm.service', 'memp-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_NETWORK: ['network-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_SYSTEMD: ['systemd-malcolm.service'],
+            COMPOSE_MALCOLM_EXTENSION_AUX_FW_THERMAL: ['thermal-malcolm.service'],
+        },
+        COMPOSE_MALCOLM_EXTENSION_PRUNE: {
+            COMPOSE_MALCOLM_EXTENSION_PRUNE_PCAP: ['prune-pcap.service'],
+            COMPOSE_MALCOLM_EXTENSION_PRUNE_LOGS: ['prune-suricata.service', 'prune-zeek.service'],
+        },
+    }
+
+    service_base_path = Path.home() / ".config" / "systemd" / "user"
+
+    # for the auxiliary forwarders, we need to know where we're forwarding this data too,
+    #   it should be the same as LOGSTASH_HOST albeit with :5045 instead of :5044
+    service_tcp_output_pattern = re.compile(r"-o\s+tcp://\S+")
+    filebeatDest = None
+    logstashEnvFile = os.path.join(args.configDir, 'beats-common.env')
+    if os.path.isfile(logstashEnvFile):
+        logstashDestSuffix = ':5044'
+        filebeatDestSuffix = ':5045'
+        logstashEnvs = dotenvImported.dotenv_values(logstashEnvFile)
+        if (
+            (logstashDest := logstashEnvs.get('LOGSTASH_HOST', ''))
+            and (logstashDest != f'logstash{logstashDestSuffix}')
+            and logstashDest.endswith(logstashDestSuffix)
+        ):
+            filebeatDest = logstashDest[: -len(logstashDestSuffix)] + filebeatDestSuffix
+
+    # start/stop services
+    for service_type, service_map in ext_service_map.items():
+        if (
+            SYSTEM_INFO["malcolm_iso_install"]
+            and dockerComposeYaml
+            and (orchMode is OrchestrationFramework.DOCKER_COMPOSE)
+            and (service_settings := deep_get(dockerComposeYaml, [COMPOSE_MALCOLM_EXTENSION, service_type], {}))
+            and isinstance(service_settings, dict)
+        ):
+            # if this is a forwarder service and  we've got a destination, edit the .service file accordingly and daemon-reload
+            if (service_type == COMPOSE_MALCOLM_EXTENSION_AUX_FW) and start and filebeatDest:
+                for sysctl_service in (s for services in service_map.values() for s in services):
+                    service_path = service_base_path / sysctl_service
+                    service_text_updated = service_tcp_output_pattern.sub(
+                        f"-o tcp://{filebeatDest}", service_path.read_text()
+                    )
+                    service_path.write_text(service_text_updated)
+                err, out = run_process(['systemctl', '--user', 'daemon-reload'], debug=log_level_is_debug(args.verbose))
+                if err != 0:
+                    logging.error(f"systemctl --user daemon-reload failed: {out}")
+
+            for service_key, enabled in service_settings.items():
+                if isinstance(service_key, str) and isinstance(enabled, bool):
+
+                    # enable and start each service
+                    for sysctl_service in service_map.get(service_key, []):
+                        err, out = run_process(
+                            [
+                                'systemctl',
+                                '--user',
+                                'enable' if (enabled and start) else 'disable',
+                                '--now',
+                                sysctl_service,
+                            ],
+                            debug=log_level_is_debug(args.verbose),
+                        )
+                        if err == 0:
+                            logging.info(
+                                f"{'Started and enabled' if (enabled and start) else 'Stopped and disabled'} {sysctl_service}"
+                            )
+                        else:
+                            logging.error(
+                                f"{'Starting and enabling' if (enabled and start) else 'Stopping and disabling'} {sysctl_service} failed: {out}"
+                            )
+
+
 ###################################################################################################
 # perform a service-keystore operation in a container
 #
@@ -442,6 +582,7 @@ def keystore_op(service, dropPriv=False, *keystore_args, **run_process_kwargs):
     global args
     global dockerBin
     global dockerComposeBin
+    global dockerComposeYaml
     global orchMode
 
     err = -1
@@ -1148,13 +1289,17 @@ def stop(wipe=False):
                 logging.critical("\n".join(out))
                 exit(err)
 
+            # stop auxiliary forwarders (fluent bit)
+            malcolm_iso_services_op(start=False)
+
             if wipe:
                 # there is some overlap here among some of these containers, but it doesn't matter
                 boundPathsToWipe = (
                     BoundPath("filebeat", "/zeek", True, None, None),
-                    BoundPath("file-monitor", "/zeek/logs", True, None, None),
+                    BoundPath("filescan", "/filescan/data/logs", True, None, ["."]),
                     BoundPath("opensearch", "/usr/share/opensearch/data", True, ["nodes"], None),
                     BoundPath("pcap-monitor", "/pcap", True, ["arkime-live", "processed", "upload"], None),
+                    BoundPath("redis", "/data", True, None, None),
                     BoundPath("suricata", "/var/log/suricata", True, None, ["."]),
                     BoundPath(
                         "upload",
@@ -1240,22 +1385,31 @@ def start():
     global dockerBin
     global dockerComposeBin
     global orchMode
+    global dockerComposeYaml
+    global dotenvImported
 
     if args.service is None:
-        touch(os.path.join(GetMalcolmPath(), os.path.join('htadmin', 'metadata')))
         touch(os.path.join(GetMalcolmPath(), '.opensearch.primary.curlrc'))
         touch(os.path.join(GetMalcolmPath(), '.opensearch.secondary.curlrc'))
+        touch(os.path.join(GetMalcolmPath(), os.path.join('htadmin', 'metadata')))
+        touch(os.path.join(GetMalcolmPath(), os.path.join('nginx', 'htpasswd')))
         touch(os.path.join(GetMalcolmPath(), os.path.join('nginx', 'nginx_ldap.conf')))
 
         # make sure the auth files exist. if we are in an interactive shell and we're
         # missing any of the auth files, prompt to create them now
-        if sys.__stdin__.isatty() and (not MalcolmAuthFilesExist(configDir=args.configDir)):
+        if sys.__stdin__.isatty() and (
+            not MalcolmAuthFilesExist(
+                configDir=args.configDir, run_profile=args.composeProfile, auth_method=getNginxAuthMethod()
+            )
+        ):
             authSetup()
 
         # still missing? sorry charlie
-        if not MalcolmAuthFilesExist(configDir=args.configDir):
+        if not MalcolmAuthFilesExist(
+            configDir=args.configDir, run_profile=args.composeProfile, auth_method=getNginxAuthMethod()
+        ):
             raise Exception(
-                'Malcolm administrator account authentication files are missing, please run ./scripts/auth_setup to generate them'
+                'Files relating to authentication and/or secrets are missing, please run ./scripts/auth_setup to generate them'
             )
 
         # if the OpenSearch keystore doesn't exist exist, create empty ones
@@ -1267,15 +1421,17 @@ def start():
             os.path.join(GetMalcolmPath(), os.path.join('nginx', 'htpasswd')),
             os.path.join(GetMalcolmPath(), os.path.join('htadmin', 'metadata')),
         ]:
-            # chmod 644 authFile
-            os.chmod(authFile, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+            if os.path.isfile(authFile):
+                # chmod 644 authFile
+                os.chmod(authFile, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
         for authFile in [
             os.path.join(GetMalcolmPath(), os.path.join('nginx', 'nginx_ldap.conf')),
             os.path.join(GetMalcolmPath(), '.opensearch.primary.curlrc'),
             os.path.join(GetMalcolmPath(), '.opensearch.secondary.curlrc'),
         ]:
-            # chmod 600 authFile
-            os.chmod(authFile, stat.S_IRUSR | stat.S_IWUSR)
+            if os.path.isfile(authFile):
+                # chmod 600 authFile
+                os.chmod(authFile, stat.S_IRUSR | stat.S_IWUSR)
         with pushd(args.configDir):
             for envFile in glob.glob("*.env"):
                 # chmod 600 envFile
@@ -1294,7 +1450,8 @@ def start():
         if args.service is None:
             # make sure some directories exist before we start
             boundPathsToCreate = (
-                BoundPath("file-monitor", "/zeek/logs", False, None, None),
+                BoundPath("filescan", "/filescan/data/logs", False, None, None),
+                BoundPath("filescan", "/filescan/data/files", False, None, None),
                 BoundPath("nginx-proxy", "/var/local/ca-trust", False, None, None),
                 BoundPath("netbox", "/opt/netbox/netbox/media", False, None, None),
                 BoundPath("postgres", "/var/lib/postgresql/data", False, None, None),
@@ -1310,10 +1467,10 @@ def start():
                     [os.path.join('tmp', 'spool'), "variants"],
                     None,
                 ),
-                BoundPath("zeek", "/zeek/extract_files", False, None, None),
+                BoundPath("zeek", "/zeek/extract_files", False, ["filescan"], None),
                 BoundPath("zeek", "/zeek/upload", False, None, None),
-                BoundPath("zeek", "/opt/zeek/share/zeek/site/custom", False, None, None),
-                BoundPath("zeek", "/opt/zeek/share/zeek/site/intel", False, ["Mandiant", "MISP", "STIX"], None),
+                BoundPath("zeek", "/usr/local/zeek/share/zeek/site/custom", False, None, None),
+                BoundPath("zeek", "/usr/local/zeek/share/zeek/site/intel", False, ["Mandiant", "MISP", "STIX"], None),
                 BoundPath("zeek-live", "/zeek/live", False, ["spool"], None),
                 BoundPath(
                     "filebeat", "/zeek", False, ["processed", "current", "live", "extract_files", "upload"], None
@@ -1346,6 +1503,72 @@ def start():
                                     pass
                                 else:
                                     raise
+
+        ###################################
+        # steps that are *specific* for a Malcolm ISO install
+        if SYSTEM_INFO["malcolm_iso_install"] and dockerComposeYaml:
+
+            # if we can control the UFW firewall clear it now
+            ufw_manager_cmd = 'ufw_manager.sh'
+            if not which(ufw_manager_cmd):
+                if os.path.isfile(os.path.join('/usr/local/bin/', ufw_manager_cmd)):
+                    ufw_manager_cmd = os.path.join('/usr/local/bin/', ufw_manager_cmd)
+                else:
+                    ufw_manager_cmd = None
+
+            if ufw_manager_cmd:
+                ufw_manager_cmd = ["sudo", ufw_manager_cmd]
+
+                # clear out the firewall
+                err, out = run_process([ufw_manager_cmd, '-a', 'reset'], debug=log_level_is_debug(args.verbose))
+                if err == 0:
+                    logging.info('Reset the UFW firewall')
+                else:
+                    logging.error(f"Resetting UFW firewall failed: {out}")
+
+                # open ports in the docker-compose.yml that are exposed (e.g., 0.0.0.0),
+                # with the exception of those controlled by ACL (arkime and extracted file reachback)
+                for port in GetExposedPorts(
+                    dockerComposeYaml,
+                    exclude_ports={
+                        str(SERVICE_PORT_HEDGEHOG_PROFILE_ARKIME_VIEWER),
+                        str(SERVICE_PORT_HEDGEHOG_PROFILE_EXTRACTED_FILES),
+                    },
+                ):
+                    err, out = run_process(
+                        [ufw_manager_cmd, '-a', 'allow', str(port)], debug=log_level_is_debug(args.verbose)
+                    )
+                    if err == 0:
+                        logging.info(f'Allowing port {port} through the UFW firewall')
+                    else:
+                        logging.error(f"Setting UFW 'allow {port}' failed: {out}")
+
+                # open the reachback ports for the IPs in the ACL
+                if reachback_request_acl_list := deep_get(
+                    dockerComposeYaml,
+                    [
+                        COMPOSE_MALCOLM_EXTENSION,
+                        COMPOSE_MALCOLM_EXTENSION_HEDGEHOG,
+                        COMPOSE_MALCOLM_EXTENSION_HEDGEHOG_REACHBACK_REQUEST_ACL,
+                    ],
+                    [],
+                ):
+                    for ip in reachback_request_acl_list:
+                        for port in [
+                            SERVICE_PORT_HEDGEHOG_PROFILE_ARKIME_VIEWER,
+                            SERVICE_PORT_HEDGEHOG_PROFILE_EXTRACTED_FILES,
+                        ]:
+                            err, out = run_process(
+                                [ufw_manager_cmd, '-a', 'allow', 'from', ip, 'to', 'any', 'port', port],
+                                debug=log_level_is_debug(args.verbose),
+                            )
+                            if err == 0:
+                                logging.info(f'Allowing port {port} from {ip} through the UFW firewall')
+                            else:
+                                logging.error(f"Setting UFW 'allow from {ip}' failed: {out}")
+
+            # start/stop auxiliary forwarders (fluent bit)
+            malcolm_iso_services_op(start=True)
 
         # increase COMPOSE_HTTP_TIMEOUT to be ridiculously large so docker-compose never times out the TTY doing debug output
         osEnv = os.environ.copy()
@@ -1393,8 +1616,10 @@ def start():
                 imageSource=args.imageSource,
                 imageTag=args.imageTag,
                 injectResources=args.injectResources,
+                preferHeavyWorkloadSeparation=args.preferHeavyWorkloadSeparation,
                 startCapturePods=not args.noCapturePodsStart,
                 noCapabilities=args.noCapabilities,
+                dryrun=args.dryRun,
             )
 
             if dictsearch(startResults, 'error'):
@@ -1402,7 +1627,8 @@ def start():
                     f"Starting the {args.namespace} namespace and creating its underlying resources returned the following error(s):\n"
                 )
                 logging.error(startResults)
-
+            elif args.dryRun:
+                logging.info(json.dumps(startResults))
             else:
                 logging.debug(startResults)
 
@@ -1423,88 +1649,6 @@ def start():
 
 
 ###################################################################################################
-def clientForwarderCertGen(caCrt, caKey, clientConf, outputDir):
-    global args
-    global opensslBin
-
-    clientKey = None
-    clientCrt = None
-    clientCaCrt = None
-
-    with tempfile.TemporaryDirectory(dir=MalcolmTmpPath) as tmpCertDir:
-        with pushd(tmpCertDir):
-            err, out = run_process(
-                [opensslBin, 'genrsa', '-out', 'client.key', '2048'],
-                stderr=True,
-                debug=log_level_is_debug(args.verbose),
-            )
-            if err != 0:
-                raise Exception(f'Unable to generate client.key: {out}')
-
-            err, out = run_process(
-                [
-                    opensslBin,
-                    'req',
-                    '-sha512',
-                    '-new',
-                    '-key',
-                    'client.key',
-                    '-out',
-                    'client.csr',
-                    '-config',
-                    clientConf,
-                ],
-                stderr=True,
-                debug=log_level_is_debug(args.verbose),
-            )
-            if err != 0:
-                raise Exception(f'Unable to generate client.csr: {out}')
-
-            err, out = run_process(
-                [
-                    opensslBin,
-                    'x509',
-                    '-days',
-                    '3650',
-                    '-req',
-                    '-sha512',
-                    '-in',
-                    'client.csr',
-                    '-CAcreateserial',
-                    '-CA',
-                    caCrt,
-                    '-CAkey',
-                    caKey,
-                    '-out',
-                    'client.crt',
-                    '-extensions',
-                    'v3_req',
-                    '-extensions',
-                    'usr_cert',
-                    '-extfile',
-                    clientConf,
-                ],
-                stderr=True,
-                debug=log_level_is_debug(args.verbose),
-            )
-            if err != 0:
-                raise Exception(f'Unable to generate client.crt: {out}')
-
-            if os.path.isfile('client.key'):
-                shutil.move('client.key', outputDir)
-                clientKey = os.path.join(outputDir, 'client.key')
-            if os.path.isfile('client.crt'):
-                shutil.move('client.crt', outputDir)
-                clientCrt = os.path.join(outputDir, 'client.crt')
-            clientCaCrt = os.path.join(outputDir, os.path.basename(caCrt))
-            if not os.path.isfile(clientCaCrt) or not same_file_or_dir(caCrt, clientCaCrt):
-                shutil.copy2(caCrt, clientCaCrt)
-            # -----------------------------------------------
-
-    return clientKey, clientCrt, clientCaCrt
-
-
-###################################################################################################
 def authSetup():
     global args
     global opensslBin
@@ -1518,11 +1662,11 @@ def authSetup():
     if (pyPlatform != PLATFORM_WINDOWS) and which("croc"):
         txRxScript = 'tx-rx-secure.sh' if which('tx-rx-secure.sh') else None
         if not txRxScript:
-            txRxScript = os.path.join(GetMalcolmPath(), os.path.join('shared', os.path.join('bin', 'tx-rx-secure.sh')))
+            txRxScript = os.path.join(GetMalcolmPath(), os.path.join('scripts', 'tx-rx-secure.sh'))
             txRxScript = (
                 txRxScript
                 if (txRxScript and os.path.isfile(txRxScript))
-                else os.path.join(GetMalcolmPath(), os.path.join('scripts', 'tx-rx-secure.sh'))
+                else os.path.join(GetMalcolmPath(), os.path.join('shared', os.path.join('bin', 'tx-rx-secure.sh')))
             )
             txRxScript = txRxScript if (txRxScript and os.path.isfile(txRxScript)) else '/usr/local/bin/tx-rx-secure.sh'
             txRxScript = txRxScript if (txRxScript and os.path.isfile(txRxScript)) else '/usr/bin/tx-rx-secure.sh'
@@ -1532,23 +1676,21 @@ def authSetup():
     authCommonEnvFile = os.path.join(args.configDir, 'auth-common.env')
     nginxEnvFile = os.path.join(args.configDir, 'nginx.env')
     openSearchEnvFile = os.path.join(args.configDir, 'opensearch.env')
+    nginxAuthMode = getNginxAuthMethod()
 
-    if args.authMode:
-        nginxAuthMode = str(args.authMode).lower()
-    else:
-        nginxAuthMode = 'unknown'
-        if os.path.isfile(authCommonEnvFile):
-            nginxAuthMode = str(
-                dotenvImported.dotenv_values(authCommonEnvFile).get('NGINX_AUTH_MODE', nginxAuthMode)
-            ).lower()
     netboxMode = ''
     if os.path.isfile(netboxCommonEnvFile):
         netboxMode = str(dotenvImported.dotenv_values(netboxCommonEnvFile).get('NETBOX_MODE', '')).lower()
     osPrimaryMode = ''
     osSecondaryMode = ''
+    osPrimaryUrl = ''
+    osSecondaryUrl = ''
     if os.path.isfile(openSearchEnvFile):
-        osPrimaryMode = str(dotenvImported.dotenv_values(openSearchEnvFile).get('OPENSEARCH_PRIMARY', '')).lower()
-        osSecondaryMode = str(dotenvImported.dotenv_values(openSearchEnvFile).get('OPENSEARCH_SECONDARY', '')).lower()
+        openSearchEnvs = dotenvImported.dotenv_values(openSearchEnvFile)
+        osPrimaryMode = str(openSearchEnvs.get('OPENSEARCH_PRIMARY', '')).lower()
+        osSecondaryMode = str(openSearchEnvs.get('OPENSEARCH_SECONDARY', '')).lower()
+        osPrimaryUrl = str(openSearchEnvs.get('OPENSEARCH_URL', '')).lower()
+        osSecondaryUrl = str(openSearchEnvs.get('OPENSEARCH_SECONDARY_URL', '')).lower()
 
     # don't make them go through every thing every time, give them a choice instead
     # 0 - key
@@ -1567,14 +1709,14 @@ def authSetup():
                 [],
             ),
             (
-                'method',
+                'method' if (args.composeProfile == PROFILE_MALCOLM) else None,
                 f"Select authentication method (currently \"{nginxAuthMode}\")",
                 False,
                 (not args.cmdAuthSetupNonInteractive) or bool(args.authMode),
                 [],
             ),
             (
-                'admin',
+                'admin' if (args.composeProfile == PROFILE_MALCOLM) else None,
                 "Store administrator username/password for basic HTTP authentication",
                 False,
                 (not args.cmdAuthSetupNonInteractive)
@@ -1582,7 +1724,7 @@ def authSetup():
                 [],
             ),
             (
-                'webcerts',
+                'webcerts' if (args.composeProfile == PROFILE_MALCOLM) else None,
                 "(Re)generate self-signed certificates for HTTPS access",
                 False,
                 not args.cmdAuthSetupNonInteractive
@@ -1595,7 +1737,7 @@ def authSetup():
                 [os.path.join(GetMalcolmPath(), os.path.join('nginx', os.path.join('certs', 'key.pem')))],
             ),
             (
-                'fwcerts',
+                'fwcerts' if (args.composeProfile == PROFILE_MALCOLM) else None,
                 "(Re)generate self-signed certificates for a remote log forwarder",
                 False,
                 not args.cmdAuthSetupNonInteractive
@@ -1610,7 +1752,11 @@ def authSetup():
                 ],
             ),
             (
-                'keycloak' if nginxAuthMode.startswith('keycloak') else None,
+                (
+                    'keycloak'
+                    if ((args.composeProfile == PROFILE_MALCOLM) and nginxAuthMode.startswith('keycloak'))
+                    else None
+                ),
                 "Configure Keycloak",
                 False,
                 bool(
@@ -1628,56 +1774,71 @@ def authSetup():
                 [],
             ),
             (
-                'rbac' if nginxAuthMode.startswith('keycloak') else None,
+                'rbac' if ((args.composeProfile == PROFILE_MALCOLM) and nginxAuthMode.startswith('keycloak')) else None,
                 "Configure Role-Based Access Control",
                 False,
                 bool(nginxAuthMode.startswith('keycloak') or args.authRbacEnabled),
                 [],
             ),
             (
-                'remoteos' if any('-remote' in x for x in [osPrimaryMode, osSecondaryMode]) else None,
-                "Configure remote primary or secondary OpenSearch/Elasticsearch instance",
+                (
+                    'remoteos'
+                    if (
+                        (args.composeProfile != PROFILE_MALCOLM)
+                        or any('-remote' in x for x in [osPrimaryMode, osSecondaryMode])
+                    )
+                    else None
+                ),
+                f"Store username/password for {'primary or secondary ' if (args.composeProfile == PROFILE_MALCOLM) else ''}OpenSearch/Elasticsearch instance",
                 False,
                 False,
                 [],
             ),
             (
-                'localos' if osPrimaryMode == 'opensearch-local' else None,
+                (
+                    'localos'
+                    if ((args.composeProfile == PROFILE_MALCOLM) and (osPrimaryMode == 'opensearch-local'))
+                    else None
+                ),
                 "(Re)generate internal passwords for local primary OpenSearch instance",
                 False,
                 (not args.cmdAuthSetupNonInteractive) or args.authGenOpensearchCreds,
                 [os.path.join(GetMalcolmPath(), '.opensearch.primary.curlrc')],
             ),
             (
-                'email',
+                'email' if (args.composeProfile == PROFILE_MALCOLM) else None,
                 "Store username/password for OpenSearch Alerting email sender account",
                 False,
                 False,
                 [],
             ),
             (
-                'netbox' if (netboxMode == 'local') else None,
+                'netbox' if ((args.composeProfile == PROFILE_MALCOLM) and (netboxMode == 'local')) else None,
                 "(Re)generate internal passwords for NetBox",
                 False,
                 (not args.cmdAuthSetupNonInteractive) or args.authGenNetBoxPasswords,
                 [],
             ),
             (
-                'netbox-remote-token' if (netboxMode == 'remote') else None,
+                (
+                    'netbox-remote-token'
+                    if ((args.composeProfile == PROFILE_MALCOLM) and (netboxMode == 'remote'))
+                    else None
+                ),
                 "Store API token for remote NetBox instance",
                 False,
                 (not args.cmdAuthSetupNonInteractive) or (bool(args.authNetBoxRemoteToken)),
                 [],
             ),
             (
-                'keycloakdb' if nginxAuthMode == 'keycloak' else None,
+                'keycloakdb' if ((args.composeProfile == PROFILE_MALCOLM) and (nginxAuthMode == 'keycloak')) else None,
                 "(Re)generate internal passwords for Keycloak's PostgreSQL database",
                 False,
                 (not args.cmdAuthSetupNonInteractive) or args.authGenKeycloakDbPassword,
                 [],
             ),
             (
-                'postgres',
+                'postgres' if (args.composeProfile == PROFILE_MALCOLM) else None,
                 "(Re)generate internal superuser passwords for PostgreSQL",
                 False,
                 (not args.cmdAuthSetupNonInteractive) or args.authGenPostgresPassword,
@@ -1698,8 +1859,12 @@ def authSetup():
                 [],
             ),
             (
-                'txfwcerts' if txRxScript else None,
-                "Transfer self-signed client certificates to a remote log forwarder",
+                f"{'tx' if (args.composeProfile == PROFILE_MALCOLM) else 'rx'}fwcerts" if txRxScript else None,
+                (
+                    "Transfer self-signed client certificates to a remote log forwarder"
+                    if (args.composeProfile == PROFILE_MALCOLM)
+                    else "Receive client certificates from Malcolm"
+                ),
                 False,
                 False,
                 [],
@@ -1724,6 +1889,7 @@ def authSetup():
     defaultBehavior = (
         UserInputDefaultsBehavior.DefaultsPrompt if not args.cmdAuthSetupNonInteractive else noninteractiveBehavior
     )
+    authMethodChanged = False
 
     try:
         for authItem in authConfigChoices[1:]:
@@ -1781,6 +1947,7 @@ def authSetup():
                             choices=authMethodChoices,
                         ).lower()
                     if newNginxAuthMode:
+                        authMethodChanged = nginxAuthMode != newNginxAuthMode
                         nginxAuthMode = newNginxAuthMode
 
                     ldapStartTLS = False
@@ -1870,6 +2037,13 @@ def authSetup():
                             ],
                             stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
                         )
+
+                    if authMethodChanged and (authConfigChoice == 'all'):
+                        DisplayMessage(
+                            f'Authentication method has changed! Please re-run auth_setup for new options.',
+                            defaultBehavior=defaultBehavior,
+                        )
+                        break
 
                 elif authItem[0] == 'admin':
                     # prompt username and password
@@ -1996,242 +2170,161 @@ def authSetup():
                     with pushd(os.path.join(GetMalcolmPath(), os.path.join('nginx', 'certs'))):
                         # remove previous files
                         for oldfile in glob.glob("*.pem"):
-                            os.remove(oldfile)
+                            try:
+                                os.remove(oldfile)
+                            except Exception:
+                                pass
 
-                        # generate dhparam -------------------------------
-                        err, out = run_process(
-                            [opensslBin, 'dhparam', '-out', 'dhparam.pem', '2048'],
-                            stderr=True,
+                        # generate dhparam/key/cert -------------------------------
+                        file_renames = {'server.key': 'key.pem', 'server.crt': 'cert.pem'}
+                        for file in openssl_self_signed_keygen(
+                            openssl=opensslBin,
+                            dhparam_prefix='dhparam',
+                            ca_prefix=None,
+                            server_prefix='server',
+                            temp_dir=MalcolmTmpPath if os.path.isdir(str(MalcolmTmpPath)) else None,
                             debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate dhparam.pem file: {out}')
-
-                        # generate key/cert -------------------------------
-                        err, out = run_process(
-                            [
-                                opensslBin,
-                                'req',
-                                '-subj',
-                                '/CN=localhost',
-                                '-x509',
-                                '-newkey',
-                                'rsa:4096',
-                                '-nodes',
-                                '-keyout',
-                                'key.pem',
-                                '-out',
-                                'cert.pem',
-                                '-days',
-                                '3650',
-                            ],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate key.pem/cert.pem file(s): {out}')
+                        ):
+                            filename = os.path.basename(file)
+                            if filename in file_renames:
+                                shutil.move(file, file_renames[filename])
 
                 elif authItem[0] == 'fwcerts':
-                    with pushd(logstashPath):
-                        # make clean to clean previous files
-                        for pat in ['*.srl', '*.csr', '*.key', '*.crt', '*.pem']:
-                            for oldfile in glob.glob(pat):
-                                os.remove(oldfile)
-
-                        # -----------------------------------------------
-                        # generate new ca/server/client certificates/keys
-                        # ca -------------------------------
-                        err, out = run_process(
-                            [opensslBin, 'genrsa', '-out', 'ca.key', '2048'],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate ca.key: {out}')
-
-                        err, out = run_process(
-                            [
-                                opensslBin,
-                                'req',
-                                '-x509',
-                                '-new',
-                                '-nodes',
-                                '-key',
-                                'ca.key',
-                                '-sha256',
-                                '-days',
-                                '9999',
-                                '-subj',
-                                '/C=US/ST=ID/O=sensor/OU=ca',
-                                '-out',
-                                'ca.crt',
-                            ],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate ca.crt: {out}')
-
-                        # server -------------------------------
-                        err, out = run_process(
-                            [opensslBin, 'genrsa', '-out', 'server.key', '2048'],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate server.key: {out}')
-
-                        err, out = run_process(
-                            [
-                                opensslBin,
-                                'req',
-                                '-sha512',
-                                '-new',
-                                '-key',
-                                'server.key',
-                                '-out',
-                                'server.csr',
-                                '-config',
-                                'server.conf',
-                            ],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate server.csr: {out}')
-
-                        err, out = run_process(
-                            [
-                                opensslBin,
-                                'x509',
-                                '-days',
-                                '3650',
-                                '-req',
-                                '-sha512',
-                                '-in',
-                                'server.csr',
-                                '-CAcreateserial',
-                                '-CA',
-                                'ca.crt',
-                                '-CAkey',
-                                'ca.key',
-                                '-out',
-                                'server.crt',
-                                '-extensions',
-                                'v3_req',
-                                '-extfile',
-                                'server.conf',
-                            ],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate server.crt: {out}')
-
-                        shutil.move("server.key", "server.key.pem")
-                        err, out = run_process(
-                            [opensslBin, 'pkcs8', '-in', 'server.key.pem', '-topk8', '-nocrypt', '-out', 'server.key'],
-                            stderr=True,
-                            debug=log_level_is_debug(args.verbose),
-                        )
-                        if err != 0:
-                            raise Exception(f'Unable to generate server.key: {out}')
-
-                        # client -------------------------------
-                        # mkdir filebeat/certs if it doesn't exist
+                    for cpath in (logstashPath, filebeatPath):
+                        # ensure dest directories exist
                         try:
-                            os.makedirs(filebeatPath)
+                            os.makedirs(cpath)
                         except OSError as exc:
-                            if (exc.errno == errno.EEXIST) and os.path.isdir(filebeatPath):
+                            if (exc.errno == errno.EEXIST) and os.path.isdir(cpath):
                                 pass
                             else:
                                 raise
+                        # make clean to clean previous files
+                        for oldfile in glob.glob(os.path.join(cpath, "*")):
+                            try:
+                                os.remove(oldfile)
+                            except Exception:
+                                pass
 
-                        # remove previous files in filebeat/certs
-                        for oldfile in glob.glob(os.path.join(filebeatPath, "*")):
-                            os.remove(oldfile)
-
-                        clientKey, clientCrt, clientCaCrt = clientForwarderCertGen(
-                            caCrt=os.path.join(logstashPath, 'ca.crt'),
-                            caKey=os.path.join(logstashPath, 'ca.key'),
-                            clientConf=os.path.join(logstashPath, 'client.conf'),
-                            outputDir=filebeatPath,
+                    with pushd(logstashPath):
+                        # -----------------------------------------------
+                        # generate new ca/server/client certificates/keys
+                        ssl_files = openssl_self_signed_keygen(
+                            openssl=opensslBin,
+                            ca_prefix='ca',
+                            server_prefix='server',
+                            client_prefix='client',
+                            clients=1,
+                            temp_dir=MalcolmTmpPath if os.path.isdir(str(MalcolmTmpPath)) else None,
+                            debug=log_level_is_debug(args.verbose),
                         )
-                        if (
-                            (not clientKey)
-                            or (not clientCrt)
-                            or (not clientCaCrt)
-                            or (not os.path.isfile(clientKey))
-                            or (not os.path.isfile(clientCrt))
-                            or (not os.path.isfile(clientCaCrt))
-                        ):
-                            raise Exception(f'Unable to generate client key/crt')
+                        for filename in [x for x in ssl_files if os.path.basename(x).startswith('client')]:
+                            shutil.move(filename, os.path.join(filebeatPath, os.path.basename(filename)))
+                        shutil.copyfile(os.path.join(logstashPath, 'ca.crt'), os.path.join(filebeatPath, 'ca.crt'))
                         # -----------------------------------------------
 
                 # create and populate connection parameters file for remote OpenSearch instance(s)
                 elif authItem[0] == 'remoteos':
-                    for instance in ['primary', 'secondary']:
+                    for instance in ['primary', 'secondary'][: 2 if args.composeProfile == PROFILE_MALCOLM else 1]:
                         openSearchCredFileName = os.path.join(GetMalcolmPath(), f'.opensearch.{instance}.curlrc')
-                        if YesOrNo(
+                        if (args.composeProfile != PROFILE_MALCOLM) or YesOrNo(
                             f'Store username/password for {instance} remote OpenSearch/Elasticsearch instance?',
                             default=False,
                             defaultBehavior=defaultBehavior,
                         ):
                             prevCurlContents = ParseCurlFile(openSearchCredFileName)
 
-                            # prompt host, username and password
-                            esUsername = None
-                            esPassword = None
-                            esPasswordConfirm = None
+                            while True:
+                                # prompt host, username and password
+                                esUsername = None
+                                esPassword = None
+                                esPasswordConfirm = None
 
-                            loopBreaker = CountUntilException(
-                                MaxAskForValueCount, 'Invalid OpenSearch/Elasticsearch username'
-                            )
-                            while loopBreaker.increment():
-                                esUsername = AskForString(
-                                    "OpenSearch/Elasticsearch username",
-                                    default=prevCurlContents['user'],
-                                    defaultBehavior=defaultBehavior,
+                                loopBreaker = CountUntilException(
+                                    MaxAskForValueCount, 'Invalid OpenSearch/Elasticsearch username'
                                 )
-                                if (len(esUsername) > 0) and (':' not in esUsername):
-                                    break
-                                logging.error("Username is blank (or contains a colon, which is not allowed)")
-
-                            loopBreaker = CountUntilException(
-                                MaxAskForValueCount, 'Invalid OpenSearch/Elasticsearch password'
-                            )
-                            while loopBreaker.increment():
-                                esPassword = AskForPassword(
-                                    f"{esUsername} password: ",
-                                    default='',
-                                    defaultBehavior=defaultBehavior,
-                                )
-                                if (
-                                    (len(esPassword) == 0)
-                                    and (prevCurlContents['password'] is not None)
-                                    and YesOrNo(
-                                        f'Use previously entered password for "{esUsername}"?',
-                                        default=True,
+                                while loopBreaker.increment():
+                                    esUsername = AskForString(
+                                        "OpenSearch/Elasticsearch username",
+                                        default=prevCurlContents['user'],
                                         defaultBehavior=defaultBehavior,
                                     )
-                                ):
-                                    esPassword = prevCurlContents['password']
-                                    esPasswordConfirm = esPassword
-                                else:
-                                    esPasswordConfirm = AskForPassword(
-                                        f"{esUsername} password (again): ",
+                                    if (len(esUsername) > 0) and (':' not in esUsername):
+                                        break
+                                    logging.error("Username is blank (or contains a colon, which is not allowed)")
+
+                                loopBreaker = CountUntilException(
+                                    MaxAskForValueCount, 'Invalid OpenSearch/Elasticsearch password'
+                                )
+                                while loopBreaker.increment():
+                                    esPassword = AskForPassword(
+                                        f"{esUsername} password: ",
                                         default='',
                                         defaultBehavior=defaultBehavior,
                                     )
-                                if (esPassword == esPasswordConfirm) and (len(esPassword) > 0):
-                                    break
-                                logging.error("Passwords do not match")
+                                    if (
+                                        (len(esPassword) == 0)
+                                        and (prevCurlContents['password'] is not None)
+                                        and YesOrNo(
+                                            f'Use previously entered password for "{esUsername}"?',
+                                            default=True,
+                                            defaultBehavior=defaultBehavior,
+                                        )
+                                    ):
+                                        esPassword = prevCurlContents['password']
+                                        esPasswordConfirm = esPassword
+                                    else:
+                                        esPasswordConfirm = AskForPassword(
+                                            f"{esUsername} password (again): ",
+                                            default='',
+                                            defaultBehavior=defaultBehavior,
+                                        )
+                                    if (esPassword == esPasswordConfirm) and (len(esPassword) > 0):
+                                        break
+                                    logging.error("Passwords do not match")
 
-                            esSslVerify = YesOrNo(
-                                'Require SSL certificate validation for OpenSearch/Elasticsearch communication?',
-                                default=False,
-                                defaultBehavior=defaultBehavior,
-                            )
+                                esSslVerify = YesOrNo(
+                                    'Require SSL certificate validation for OpenSearch/Elasticsearch communication?',
+                                    default=False,
+                                    defaultBehavior=defaultBehavior,
+                                )
+
+                                # test the connection if we're intereractive
+                                if (
+                                    not args.cmdAuthSetupNonInteractive
+                                    and (
+                                        test_connection_url := {
+                                            'primary': osPrimaryUrl,
+                                            'secondary': osSecondaryUrl,
+                                        }.get(instance, '')
+                                    )
+                                    and (
+                                        test_connection_mode := {
+                                            'primary': osPrimaryMode,
+                                            'secondary': osSecondaryMode,
+                                        }.get(instance, '')
+                                    )
+                                    and ('remote' in test_connection_mode)
+                                ):
+                                    retcode, message = test_http_connection(
+                                        url=test_connection_url,
+                                        username=esUsername,
+                                        password=esPassword,
+                                        ssl_verify=esSslVerify,
+                                    )
+                                    if retcode == 200:
+                                        DisplayMessage(
+                                            f'{instance} {test_connection_mode} connection succeeded! ({retcode} {message})'
+                                        )
+                                        break
+                                    elif YesOrNo(
+                                        f'{instance} {test_connection_mode} connection failed: ({retcode} {message}). Ignore error?',
+                                        default=True,
+                                        defaultBehavior=defaultBehavior,
+                                        yesLabel="Ignore Error",
+                                        noLabel="Start Over",
+                                    ):
+                                        break
 
                             with open(openSearchCredFileName, 'w') as f:
                                 f.write(f'user: "{EscapeForCurl(esUsername)}:{EscapeForCurl(esPassword)}"\n')
@@ -2720,32 +2813,98 @@ def authSetup():
                             stat.S_IRUSR | stat.S_IWUSR,
                         )
 
-                elif authItem[0] == 'txfwcerts':
-                    DisplayMessage(
-                        'Run configure-capture on the remote log forwarder, select "Configure Forwarding," then "Receive client SSL files..."',
-                        defaultBehavior=defaultBehavior,
-                    )
-                    # generate new client key/crt and send it
-                    with tempfile.TemporaryDirectory(dir=MalcolmTmpPath) as tmpCertDir:
-                        with pushd(tmpCertDir):
-                            clientKey, clientCrt, clientCaCrt = clientForwarderCertGen(
-                                caCrt=os.path.join(logstashPath, 'ca.crt'),
-                                caKey=os.path.join(logstashPath, 'ca.key'),
-                                clientConf=os.path.join(logstashPath, 'client.conf'),
-                                outputDir=tmpCertDir,
+                elif authItem[0].endswith('xfwcerts'):
+                    if args.composeProfile == PROFILE_MALCOLM:
+                        DisplayMessage(
+                            'Run auth_setup on the sensor and select "Receive client certificates from Malcolm"',
+                            defaultBehavior=defaultBehavior,
+                        )
+                        # generate new client key/crt and send it
+                        with tempfile.TemporaryDirectory(dir=MalcolmTmpPath) as tmpCertDir:
+                            with pushd(tmpCertDir):
+                                client_files = openssl_self_signed_keygen(
+                                    openssl=opensslBin,
+                                    outdir=tmpCertDir,
+                                    existing_ca_key=os.path.join(logstashPath, 'ca.key'),
+                                    existing_ca_crt=os.path.join(logstashPath, 'ca.crt'),
+                                    ca_prefix=None,
+                                    server_prefix=None,
+                                    client_prefix='client',
+                                    clients=1,
+                                    temp_dir=MalcolmTmpPath if os.path.isdir(str(MalcolmTmpPath)) else None,
+                                    debug=log_level_is_debug(args.verbose),
+                                )
+                                clientKey, clientCrt, clientCaCrt = (
+                                    os.path.join(tmpCertDir, 'client.key'),
+                                    os.path.join(tmpCertDir, 'client.crt'),
+                                    os.path.join(tmpCertDir, 'ca.crt'),
+                                )
+                                shutil.copyfile(os.path.join(logstashPath, 'ca.crt'), clientCaCrt)
+                                if (
+                                    (not clientKey)
+                                    or (not clientCrt)
+                                    or (not clientCaCrt)
+                                    or (not os.path.isfile(clientKey))
+                                    or (not os.path.isfile(clientCrt))
+                                    or (not os.path.isfile(clientCaCrt))
+                                ):
+                                    raise Exception(f'Unable to generate client key/crt')
+
+                                with Popen(
+                                    [txRxScript, '-t', clientCaCrt, clientCrt, clientKey],
+                                    stdout=PIPE,
+                                    stderr=STDOUT,
+                                    bufsize=0 if MainDialog else -1,
+                                ) as p:
+                                    if MainDialog:
+                                        DisplayProgramBox(
+                                            fileDescriptor=p.stdout.fileno(),
+                                            text='ssl-client-transmit',
+                                            clearScreen=True,
+                                        )
+                                    else:
+                                        while True:
+                                            output = p.stdout.readline()
+                                            if (len(output) == 0) and (p.poll() is not None):
+                                                break
+                                            if output:
+                                                print(output.decode('utf-8').rstrip())
+                                            else:
+                                                time.sleep(0.5)
+
+                                    p.poll()
+                    else:
+                        # use tx-rx-secure.sh (via croc) to get certs from Malcolm
+                        DisplayMessage(
+                            'Run auth_setup on Malcolm and select "Transfer self-signed client certificates..."',
+                            defaultBehavior=defaultBehavior,
+                        )
+
+                        tx_ip = None
+                        rx_token = None
+                        loopBreaker = CountUntilException(
+                            MaxAskForValueCount, 'Invalid Malcolm Server IP and/or code phrase'
+                        )
+                        while (not args.cmdAuthSetupNonInteractive) and loopBreaker.increment():
+                            values = AskForStrings(
+                                prompt='Receive client certificates from Malcolm',
+                                labels=['Malcolm Server IP', 'Single-use Code Phrase'],
+                                defaultBehavior=defaultBehavior,
                             )
-                            if (
-                                (not clientKey)
-                                or (not clientCrt)
-                                or (not clientCaCrt)
-                                or (not os.path.isfile(clientKey))
-                                or (not os.path.isfile(clientCrt))
-                                or (not os.path.isfile(clientCaCrt))
-                            ):
-                                raise Exception(f'Unable to generate client key/crt')
+                            if (len(values) == 2) and (len(values[0]) >= 3) and (len(values[1]) >= 16):
+                                tx_ip = values[0]
+                                rx_token = values[1]
+                                break
+
+                        if tx_ip and rx_token:
+                            for oldFile in ('ca.crt', 'client.crt', 'client.key'):
+                                try:
+                                    os.unlink(os.path.join(filebeatPath, oldFile))
+                                except Exception:
+                                    pass
 
                             with Popen(
-                                [txRxScript, '-t', clientCaCrt, clientCrt, clientKey],
+                                [txRxScript, '-s', tx_ip, '-r', rx_token, '-o', filebeatPath],
                                 stdout=PIPE,
                                 stderr=STDOUT,
                                 bufsize=0 if MainDialog else -1,
@@ -2753,7 +2912,7 @@ def authSetup():
                                 if MainDialog:
                                     DisplayProgramBox(
                                         fileDescriptor=p.stdout.fileno(),
-                                        text='ssl-client-transmit',
+                                        text='ssl-client-receive',
                                         clearScreen=True,
                                     )
                                 else:
@@ -2767,6 +2926,7 @@ def authSetup():
                                             time.sleep(0.5)
 
                                 p.poll()
+
     finally:
         if MainDialog and (not args.cmdAuthSetupNonInteractive):
             ClearScreen()
@@ -2937,6 +3097,15 @@ def main():
         help='Inject container resources from kubernetes-container-resources.yml (only for "start" operation with Kubernetes)',
     )
     kubernetesGroup.add_argument(
+        '--separate-heavy-workloads',
+        dest='preferHeavyWorkloadSeparation',
+        type=str2bool,
+        nargs='?',
+        const=True,
+        default=False,
+        help='Attempt to schedule "workload-group: heavy" deployments on different nodes (only for "start" operation with Kubernetes)',
+    )
+    kubernetesGroup.add_argument(
         '--image-source',
         required=False,
         dest='imageSource',
@@ -2952,7 +3121,7 @@ def main():
         metavar='<string>',
         type=str,
         default=os.getenv('MALCOLM_IMAGE_TAG', None),
-        help='Tag for container images (e.g., "25.09.0"; only for "start" operation with Kubernetes)',
+        help='Tag for container images (e.g., "26.02.0"; only for "start" operation with Kubernetes)',
     )
     kubernetesGroup.add_argument(
         '--delete-namespace',
@@ -2962,6 +3131,15 @@ def main():
         const=True,
         default=False,
         help='Delete Kubernetes namespace (only for "wipe" operation with Kubernetes)',
+    )
+    kubernetesGroup.add_argument(
+        '--dry-run',
+        dest='dryRun',
+        type=str2bool,
+        nargs='?',
+        const=True,
+        default=False,
+        help="Dry run, don't actually deploy (only for \"start\" operation with Kubernetes)",
     )
 
     authSetupGroup = parser.add_argument_group('Authentication Setup')
@@ -3415,7 +3593,7 @@ def main():
                     debug=log_level_is_debug(args.verbose),
                 )
             if err != 0:
-                raise Exception(f'{ScriptName} requires docker-compose, please run install.py')
+                raise Exception(f'{ScriptName} requires docker compose, please run install.py')
 
             # load compose file YAML (used to find some volume bind mount locations)
             with open(args.composeFile, 'r') as cf:

@@ -262,37 +262,24 @@ $ ls -l malcolm*.zip
 ```bash
 $ unzip malcolm-{{ site.malcolm.version }}-docker_install.zip
 Archive:  malcolm-{{ site.malcolm.version }}-docker_install.zip
-  inflating: install.py
-  inflating: malcolm_20250401_225238_df27028c.README.txt
-  inflating: malcolm_20250401_225238_df27028c.tar.gz
-  inflating: malcolm_common.py
-  inflating: malcolm_kubernetes.py
-  inflating: malcolm_utils.py
+creating: installer/
+…
+inflating: install.py              
+inflating: malcolm_20251029_140727_d22a504f.README.txt  
+inflating: malcolm_20251029_140727_d22a504f.tar.gz  
+inflating: malcolm_common.py       
+inflating: malcolm_constants.py    
+inflating: malcolm_kubernetes.py   
+inflating: malcolm_utils.py 
 ```
 
-* Run `install.py`.
-    - Malcolm's installation and configuration scripts will guide users through the setup process.
-    - Use the following resources to answer the installation and configuration questions:
-        + [Installation example using Ubuntu 24.04 LTS](ubuntu-install-example.md#InstallationExample)
-        + [In-depth description of configuration questions](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfig)
-
-* `install.py` part 1: Docker installation and system configuration
-    - The [installer script](malcolm-config.md#ConfigAndTuning) will install and configure Docker and Docker Compose, and make necessary changes to system configuration.
-
-```bash
-"docker info" failed, attempt to install Docker? (Y / n): y
-
-Attempt to install Docker using official repositories? (Y / n): y
-
-Apply recommended system tweaks automatically without asking for confirmation? y
-```
-
-* `install.py` part 2: Malcolm configuration
-    - Users should answer the remaining [configuration questions](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfig) as they apply to their use case.
+* Run `install.py`. Use the following resources to answer the installation and configuration options:
+    + [Installation example using Ubuntu 24.04 LTS](ubuntu-install-example.md#UIOpts)
+    + [In-depth description of configuration menu items](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfig)
 
 * Pull Malcolm container images
-    - Answer **Yes** when prompted to **Pull Malcolm images?**
-    - Pulling the container images may take several minutes.
+    - Select **Yes** for **Pull Malcolm Images** in the **Malcolm Installation Options** menu, or pull the images manually by running `docker compose --profile malcolm pull` or the [`./scripts/github_image_helper.sh`]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/scripts/github_image_helper.sh) convenience script
+    - Pulling the container images may take several minutes
 
 * Reboot the instance (`sudo reboot`)
     - This allows the changes to system configuration to take effect
@@ -322,7 +309,7 @@ $ cd ~/Malcolm
 
 $ ./scripts/start
 
-logstash-1 | [2025-04-10T15:03:28,294][INFO ][logstash.agent ] Pipelines running {:count=>6, :running_pipelines=>[:"malcolm-input", :"malcolm-output", :"malcolm-suricata", :"malcolm-enrichment", :"malcolm-beats", :"malcolm-zeek"], :non_running_pipelines=>[]}
+logstash | [2026-01-16T17:58:33,274][INFO ][logstash.agent           ] Pipelines running {:count=>7, :running_pipelines=>[:"malcolm-output", :"malcolm-input", :"malcolm-filescan", :"malcolm-suricata", :"malcolm-enrichment", :"malcolm-beats", :"malcolm-zeek"], :non_running_pipelines=>[]}
 
 Started Malcolm
 
@@ -337,31 +324,34 @@ Malcolm services can be accessed at https://<IP address>/
 $ cd ~/Malcolm
 
 $ ./scripts/status
-NAME                          IMAGE                                                      COMMAND                  SERVICE             CREATED         STATUS                   PORTS
-malcolm-api-1                 ghcr.io/idaholab/malcolm/api:{{ site.malcolm.version }}-arm64                 "/usr/bin/tini -- /u…"   api                 7 minutes ago   Up 7 minutes (healthy)   5000/tcp
-malcolm-arkime-1              ghcr.io/idaholab/malcolm/arkime:{{ site.malcolm.version }}-arm64              "/usr/bin/tini -- /u…"   arkime              7 minutes ago   Up 7 minutes (healthy)   8000/tcp, 8005/tcp, 8081/tcp
-malcolm-arkime-live-1         ghcr.io/idaholab/malcolm/arkime:{{ site.malcolm.version }}-arm64              "/usr/bin/tini -- /u…"   arkime-live         7 minutes ago   Up 7 minutes (healthy)
-malcolm-dashboards-1          ghcr.io/idaholab/malcolm/dashboards:{{ site.malcolm.version }}-arm64          "/usr/bin/tini -- /u…"   dashboards          7 minutes ago   Up 7 minutes (healthy)   5601/tcp
-malcolm-dashboards-helper-1   ghcr.io/idaholab/malcolm/dashboards-helper:{{ site.malcolm.version }}-arm64   "/usr/bin/tini -- /u…"   dashboards-helper   7 minutes ago   Up 7 minutes (healthy)   28991/tcp
-malcolm-file-monitor-1        ghcr.io/idaholab/malcolm/file-monitor:{{ site.malcolm.version }}-arm64        "/usr/bin/tini -- /u…"   file-monitor        7 minutes ago   Up 7 minutes (healthy)   3310/tcp, 8440/tcp
-malcolm-filebeat-1            ghcr.io/idaholab/malcolm/filebeat-oss:{{ site.malcolm.version }}-arm64        "/usr/bin/tini -- /u…"   filebeat            7 minutes ago   Up 7 minutes (healthy)
-malcolm-freq-1                ghcr.io/idaholab/malcolm/freq:{{ site.malcolm.version }}-arm64                "/usr/bin/tini -- /u…"   freq                7 minutes ago   Up 7 minutes (healthy)   10004/tcp
-malcolm-htadmin-1             ghcr.io/idaholab/malcolm/htadmin:{{ site.malcolm.version }}-arm64             "/usr/bin/tini -- /u…"   htadmin             7 minutes ago   Up 7 minutes (healthy)   80/tcp
-malcolm-keycloak-1            ghcr.io/idaholab/malcolm/keycloak:{{ site.malcolm.version }}-arm64            "/usr/bin/tini -- /u…"   keycloak            7 minutes ago   Up 7 minutes (healthy)   8080/tcp, 8443/tcp, 9000/tcp
-malcolm-logstash-1            ghcr.io/idaholab/malcolm/logstash-oss:{{ site.malcolm.version }}-arm64        "/usr/bin/tini -- /u…"   logstash            7 minutes ago   Up 7 minutes (healthy)   5044/tcp, 9001/tcp, 9600/tcp
-malcolm-netbox-1              ghcr.io/idaholab/malcolm/netbox:{{ site.malcolm.version }}-arm64              "/usr/bin/tini -- /u…"   netbox              7 minutes ago   Up 7 minutes (healthy)   9001/tcp
-malcolm-nginx-proxy-1         ghcr.io/idaholab/malcolm/nginx-proxy:{{ site.malcolm.version }}-arm64         "/sbin/tini -- /usr/…"   nginx-proxy         7 minutes ago   Up 7 minutes (healthy)   0.0.0.0:443->443/tcp
-malcolm-opensearch-1          ghcr.io/idaholab/malcolm/opensearch:{{ site.malcolm.version }}-arm64          "/usr/bin/tini -- /u…"   opensearch          7 minutes ago   Up 7 minutes (healthy)   9200/tcp, 9300/tcp, 9600/tcp, 9650/tcp
-malcolm-pcap-capture-1        ghcr.io/idaholab/malcolm/pcap-capture:{{ site.malcolm.version }}-arm64        "/usr/bin/tini -- /u…"   pcap-capture        7 minutes ago   Up 7 minutes (healthy)
-malcolm-pcap-monitor-1        ghcr.io/idaholab/malcolm/pcap-monitor:{{ site.malcolm.version }}-arm64        "/usr/bin/tini -- /u…"   pcap-monitor        7 minutes ago   Up 7 minutes (healthy)   30441/tcp
-malcolm-postgres-1            ghcr.io/idaholab/malcolm/postgresql:{{ site.malcolm.version }}-arm64          "/sbin/tini -- /usr/…"   postgres            7 minutes ago   Up 7 minutes (healthy)   5432/tcp
-malcolm-redis-1               ghcr.io/idaholab/malcolm/redis:{{ site.malcolm.version }}-arm64               "/sbin/tini -- /usr/…"   redis               7 minutes ago   Up 7 minutes (healthy)   6379/tcp
-malcolm-redis-cache-1         ghcr.io/idaholab/malcolm/redis:{{ site.malcolm.version }}-arm64               "/sbin/tini -- /usr/…"   redis-cache         7 minutes ago   Up 7 minutes (healthy)   6379/tcp
-malcolm-suricata-1            ghcr.io/idaholab/malcolm/suricata:{{ site.malcolm.version }}-arm64            "/usr/bin/tini -- /u…"   suricata            7 minutes ago   Up 7 minutes (healthy)
-malcolm-suricata-live-1       ghcr.io/idaholab/malcolm/suricata:{{ site.malcolm.version }}-arm64            "/usr/bin/tini -- /u…"   suricata-live       7 minutes ago   Up 7 minutes (healthy)
-malcolm-upload-1              ghcr.io/idaholab/malcolm/file-upload:{{ site.malcolm.version }}-arm64         "/usr/bin/tini -- /u…"   upload              7 minutes ago   Up 7 minutes (healthy)   22/tcp, 80/tcp
-malcolm-zeek-1                ghcr.io/idaholab/malcolm/zeek:{{ site.malcolm.version }}-arm64                "/usr/bin/tini -- /u…"   zeek                7 minutes ago   Up 7 minutes (healthy)
-malcolm-zeek-live-1           ghcr.io/idaholab/malcolm/zeek:{{ site.malcolm.version }}-arm64                "/usr/bin/tini -- /u…"   zeek-live           7 minutes ago   Up 7 minutes (healthy)
+NAME                                   IMAGE                                                     COMMAND                  SERVICE             CREATED         STATUS                   PORTS
+malcolm-pipeline-api-1                 ghcr.io/idaholab/malcolm/api:{{ site.malcolm.version }}-arm64                "/usr/bin/tini -- /u…"   api                 8 minutes ago   Up 8 minutes (healthy)   5000/tcp
+malcolm-pipeline-arkime-1              ghcr.io/idaholab/malcolm/arkime:{{ site.malcolm.version }}-arm64             "/usr/bin/tini -- /u…"   arkime              8 minutes ago   Up 8 minutes (healthy)   8000/tcp, 8005/tcp, 8081/tcp
+malcolm-pipeline-arkime-live-1         ghcr.io/idaholab/malcolm/arkime:{{ site.malcolm.version }}-arm64             "/usr/bin/tini -- /u…"   arkime-live         8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-dashboards-1          ghcr.io/idaholab/malcolm/dashboards:{{ site.malcolm.version }}-arm64         "/usr/bin/tini -- /u…"   dashboards          8 minutes ago   Up 8 minutes (healthy)   5601/tcp
+malcolm-pipeline-dashboards-helper-1   ghcr.io/idaholab/malcolm/dashboards-helper:{{ site.malcolm.version }}-arm64  "/usr/bin/tini -- /u…"   dashboards-helper   8 minutes ago   Up 8 minutes (healthy)   28991/tcp
+malcolm-pipeline-filebeat-1            ghcr.io/idaholab/malcolm/filebeat-oss:{{ site.malcolm.version }}-arm64       "/usr/bin/tini -- /u…"   filebeat            8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-filescan-1            ghcr.io/idaholab/malcolm/filescan:{{ site.malcolm.version }}-arm64           "/usr/bin/tini -- /u…"   filescan            8 minutes ago   Up 8 minutes (healthy)   8001/tcp, 8006/tcp
+malcolm-pipeline-freq-1                ghcr.io/idaholab/malcolm/freq:{{ site.malcolm.version }}-arm64               "/usr/bin/tini -- /u…"   freq                8 minutes ago   Up 8 minutes (healthy)   10004/tcp
+malcolm-pipeline-htadmin-1             ghcr.io/idaholab/malcolm/htadmin:{{ site.malcolm.version }}-arm64            "/usr/bin/tini -- /u…"   htadmin             8 minutes ago   Up 8 minutes (healthy)   80/tcp
+malcolm-pipeline-keycloak-1            ghcr.io/idaholab/malcolm/keycloak:{{ site.malcolm.version }}-arm64           "/usr/bin/tini -- /u…"   keycloak            8 minutes ago   Up 8 minutes (healthy)   8080/tcp, 8443/tcp, 9000/tcp
+malcolm-pipeline-logstash-1            ghcr.io/idaholab/malcolm/logstash-oss:{{ site.malcolm.version }}-arm64       "/usr/bin/tini -- /u…"   logstash            8 minutes ago   Up 8 minutes (healthy)   5044/tcp, 9001/tcp, 9600/tcp
+malcolm-pipeline-netbox-1              ghcr.io/idaholab/malcolm/netbox:{{ site.malcolm.version }}-arm64             "/usr/bin/tini -- /u…"   netbox              8 minutes ago   Up 8 minutes (healthy)   9001/tcp
+malcolm-pipeline-nginx-proxy-1         ghcr.io/idaholab/malcolm/nginx-proxy:{{ site.malcolm.version }}-arm64        "/sbin/tini -- /usr/…"   nginx-proxy         8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-opensearch-1          ghcr.io/idaholab/malcolm/opensearch:{{ site.malcolm.version }}-arm64         "/usr/bin/tini -- /u…"   opensearch          8 minutes ago   Up 8 minutes (healthy)   9200/tcp, 9300/tcp, 9600/tcp, 9650/tcp
+malcolm-pipeline-pcap-capture-1        ghcr.io/idaholab/malcolm/pcap-capture:{{ site.malcolm.version }}-arm64       "/usr/bin/tini -- /u…"   pcap-capture        8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-pcap-monitor-1        ghcr.io/idaholab/malcolm/pcap-monitor:{{ site.malcolm.version }}-arm64       "/usr/bin/tini -- /u…"   pcap-monitor        8 minutes ago   Up 8 minutes (healthy)   30441/tcp
+malcolm-pipeline-postgres-1            ghcr.io/idaholab/malcolm/postgresql:{{ site.malcolm.version }}-arm64         "/sbin/tini -- /usr/…"   postgres            8 minutes ago   Up 8 minutes (healthy)   5432/tcp
+malcolm-pipeline-redis-1               ghcr.io/idaholab/malcolm/redis:{{ site.malcolm.version }}-arm64              "/sbin/tini -- /usr/…"   redis               8 minutes ago   Up 8 minutes (healthy)   6379/tcp
+malcolm-pipeline-redis-cache-1         ghcr.io/idaholab/malcolm/redis:{{ site.malcolm.version }}-arm64              "/sbin/tini -- /usr/…"   redis-cache         8 minutes ago   Up 8 minutes (healthy)   6379/tcp
+malcolm-pipeline-strelka-backend-1     ghcr.io/idaholab/malcolm/strelka-backend:{{ site.malcolm.version }}-arm64    "/usr/bin/tini -- /u…"   strelka-backend     8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-strelka-frontend-1    ghcr.io/idaholab/malcolm/strelka-frontend:{{ site.malcolm.version }}-arm64   "/sbin/tini -- /usr/…"   strelka-frontend    8 minutes ago   Up 8 minutes (healthy)   57314/tcp
+malcolm-pipeline-strelka-manager-1     ghcr.io/idaholab/malcolm/strelka-manager:{{ site.malcolm.version }}-arm64    "/sbin/tini -- /usr/…"   strelka-manager     8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-suricata-1            ghcr.io/idaholab/malcolm/suricata:{{ site.malcolm.version }}-arm64           "/usr/bin/tini -- /u…"   suricata            8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-suricata-live-1       ghcr.io/idaholab/malcolm/suricata:{{ site.malcolm.version }}-arm64           "/usr/bin/tini -- /u…"   suricata-live       8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-upload-1              ghcr.io/idaholab/malcolm/file-upload:{{ site.malcolm.version }}-arm64        "/usr/bin/tini -- /u…"   upload              8 minutes ago   Up 8 minutes (healthy)   22/tcp, 80/tcp
+malcolm-pipeline-zeek-1                ghcr.io/idaholab/malcolm/zeek:{{ site.malcolm.version }}-arm64               "/usr/bin/tini -- /u…"   zeek                8 minutes ago   Up 8 minutes (healthy)
+malcolm-pipeline-zeek-live-1           ghcr.io/idaholab/malcolm/zeek:{{ site.malcolm.version }}-arm64               "/usr/bin/tini -- /u…"   zeek-live           8 minutes ago   Up 8 minutes (healthy)
 ```
 
 * Connect to Malcolm's [web interface](quickstart.md#UserInterfaceURLs)
@@ -573,20 +563,24 @@ done
     ```bash
     $ unzip malcolm-{{ site.malcolm.version }}-docker_install.zip
     Archive:  malcolm-{{ site.malcolm.version }}-docker_install.zip
-      inflating: install.py
-      inflating: malcolm_20250401_225238_df27028c.README.txt
-      inflating: malcolm_20250401_225238_df27028c.tar.gz
-      inflating: malcolm_common.py
-      inflating: malcolm_kubernetes.py
-      inflating: malcolm_utils.py
+    creating: installer/
+    …
+    inflating: install.py              
+    inflating: legacy_install.py       
+    inflating: malcolm_20251029_140727_d22a504f.README.txt  
+    inflating: malcolm_20251029_140727_d22a504f.tar.gz  
+    inflating: malcolm_common.py       
+    inflating: malcolm_constants.py    
+    inflating: malcolm_kubernetes.py   
+    inflating: malcolm_utils.py 
     ```
 
 * Configure Malcolm
-    * `./install.py -f "${KUBECONFIG:-$HOME/.kube/config}"`
+    * `./configure -f "${KUBECONFIG:-$HOME/.kube/config}"`
     * Malcolm's configuration scripts will guide users through the setup process.
     * Use the following resources to answer the installation and configuration questions:
-        * [Installation example using Ubuntu 24.04 LTS](ubuntu-install-example.md#InstallationExample)
-        * [In-depth description of configuration questions](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfig)
+        + [Installation example using Ubuntu 24.04 LTS](ubuntu-install-example.md#UIOpts)
+        + [In-depth description of configuration menu items](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfig)
     * Configure [authentication](authsetup.md#AuthSetup)
         * `./Malcolm/scripts/auth_setup -f "${KUBECONFIG:-$HOME/.kube/config}"`
         * [This example](malcolm-hedgehog-e2e-iso-install.md#MalcolmAuthSetup) can guide users through the prompts.
@@ -747,7 +741,6 @@ arkime-deployment-8564cfd96f-krmpf              1/1     Running   0          36m
 arkime-live-deployment-7c55bbd8d4-mngpg         1/1     Running   0          36m
 dashboards-deployment-5bb86dc65-kp6ll           1/1     Running   0          36m
 dashboards-helper-deployment-74644df874-tr68h   1/1     Running   0          36m
-file-monitor-deployment-7579589ff7-8blpp        1/1     Running   0          36m
 filebeat-deployment-6cf57d56dd-d4hnb            1/1     Running   0          36m
 freq-deployment-6b8cfb6f65-b5h86                1/1     Running   0          36m
 htadmin-deployment-5b74cff59f-c8z5p             1/1     Running   0          36m
@@ -1008,9 +1001,9 @@ $ ssh -o IdentitiesOnly=yes -i ./malcolm-key.pem ec2-user@$INSTANCE_IP
 Users with [AWS MFA requirements](https://docs.aws.amazon.com/console/iam/self-mfa) may receive an `UnauthorizedOperation` error when performing the steps outlined above. If this is the case, the following workaround may allow the build to execute (thanks to [this GitHub comment](https://github.com/hashicorp/packer-plugin-amazon/issues/441#issuecomment-1880073476)):
 
 1. Remove the `access_key` and `secret_key` lines from the `builders` section of `packer_build.json` (right below `"type": "amazon-ebs"`)
-1. Run `aws ec2 describe-instances --profile=xxxxxxxx` (replacing `xxxxxxxx` with the credential profile name) to cause `aws` to authenticate (prompting for the MFA code) and cache the credentials
-1. At the bash command line, run: `eval "$(aws configure export-credentials --profile xxxxxxxx --format env)"` to load the current AWS credentials into environment variables in the current session
-1. Run the `packer build` command as described above
+2. Run `aws ec2 describe-instances --profile=xxxxxxxx` (replacing `xxxxxxxx` with the credential profile name) to cause `aws` to authenticate (prompting for the MFA code) and cache the credentials
+3. At the bash command line, run: `eval "$(aws configure export-credentials --profile xxxxxxxx --format env)"` to load the current AWS credentials into environment variables in the current session
+4. Run the `packer build` command as described above
 
 ## <a name="AWSAttribution"></a> Attribution
 

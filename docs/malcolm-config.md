@@ -1,8 +1,6 @@
 # <a name="ConfigAndTuning"></a>Malcolm Configuration
 
-Malcolm's runtime settings are stored (with a few exceptions) as environment variables in configuration files ending with a `.env` suffix in the `./config` directory. The `./scripts/configure` script can help users configure and tune these settings.
-
-Run `./scripts/configure` and answer the questions to configure Malcolm. For an in-depth treatment of these configuration questions, see the **Configuration** section in **[End-to-end Malcolm and Hedgehog Linux ISO Installation](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfig)**.
+Malcolm's runtime settings are stored (with a few exceptions) as environment variables in configuration files ending with a `.env` suffix in the `./config` directory. The `./scripts/configure` script can help users configure and tune these settings. For an in-depth treatment of the configuration script, see the **Configuration** section in [**End-to-end Malcolm and Hedgehog Linux ISO Installation**](malcolm-hedgehog-e2e-iso-install.md#MalcolmConfigItems).
 
 ## <a name="MalcolmConfigEnvVars"></a>Environment variable files
 
@@ -26,8 +24,8 @@ Although the configuration script automates many of the following configuration 
         + `INDEX_MANAGEMENT_SEGMENTS` - the number of segments Arlime will use to optimize sessions (default `1`)
         + `INDEX_MANAGEMENT_HOT_WARM_ENABLED` - whether or not Arkime should use a hot/warm design (storing non-session data in a warm index); setting up hot/warm index policies also requires configuration on the local nodes in accordance with the [Arkime documentation](https://arkime.com/faq#ilm)
     - The following variables configure exposing [Arkime's WISE Plugin](https://arkime.com/wise). By default, Malcolm leverages the WISE plugin internally but does not expose the functionality to the end user:
-        + `ARKIME_EXPOSE_WISE_GUI` - if set to `true` the WISE interface will be available at: `https://<MALCOLM-IP>/wise`. This defaults to `false`
-        + `ARKIME_ALLOW_WISE_GUI_CONFIG` - if set to `true` the WISE interface can be used to configure the WISE service. This only applies if `ARKIME_EXPOSE_WISE_GUI` is set to `true`. The default value is `false`.
+        + `ARKIME_EXPOSE_WISE_GUI` - if set to `true` the WISE interface will be available at: `https://<MALCOLM-IP>/wise`. This defaults to `true`.
+        + `ARKIME_ALLOW_WISE_GUI_CONFIG` - if set to `true` the WISE interface can be used to configure the WISE service. This only applies if `ARKIME_EXPOSE_WISE_GUI` is set to `true`. The default value is `true`.
         + `ARKIME_WISE_CONFIG_PIN_CODE` - the WISE service requires a configuration pin. This value will be required to save any WISE configuration changes.  The default value is `WISE2019`.
         + `ARKIME_WISE_SERVICE_URL` - to leverage WISE, arkime-capture needs to be provided a `wiseURL` value. The value of this environment variable is copied into the `wiseURL` value in arkime-live containers.
         + `WISE` - indicates if the WISE service is `on` or `off`. This environment variable defaults to `off`.
@@ -48,7 +46,7 @@ Although the configuration script automates many of the following configuration 
     - `DASHBOARDS_TIMEPICKER_FROM` and `DASHBOARDS_TIMEPICKER_TO` – sets the "from" and "to" values, respectively, for OpenSearch Dashboard's `timepicker:timeDefaults` [setting](https://docs.opensearch.org/latest/dashboards/management/advanced-settings/#general-settings) (default `now-24h` and `now`, meaning "last 24 hours")
     -  – if set to `true`, [OpenSearch Dashboards](dashboards.md#DashboardsVisualizations) will be set to dark mode upon initialization (default `true`)
     - `OPENSEARCH_INDEX_SIZE_PRUNE_LIMIT` - the maximum cumulative size of OpenSearch indices are allowed to consume before the oldest indices are deleted, see [**Managing disk usage**](#DiskUsage) below
-* **`filebeat.env`** - settings specific to [Filebeat](https://www.elastic.co/products/beats/filebeat), particularly for how Filebeat watches for new log files to parse and how it receives and stores [third-Party logs](third-party-logs.md#ThirdPartyLogs)
+* **`filebeat.env`** - settings specific to [Filebeat](https://www.elastic.co/products/beats/filebeat), particularly for how Filebeat watches for new log files to parse and how it receives and stores [third-Party logs](third-party-logs.md)
     - `LOG_CLEANUP_MINUTES` and `ZIP_CLEANUP_MINUTES` - these variables deal cleaning up already-processed log files, see [**Managing disk usage**](#DiskUsage) below
     - The following variables configure Malcolm's ability to [accept syslog](https://www.elastic.co/guide/en/beats/filebeat/current/syslog.html) messages:
         + `FILEBEAT_SYSLOG_TCP_LISTEN` and `FILEBEAT_SYSLOG_UDP_LISTEN` - if set to `true`, Malcolm will accept syslog messages over TCP and/or UDP, respectively
@@ -58,6 +56,19 @@ Although the configuration script automates many of the following configuration 
         + `FILEBEAT_SYSLOG_TCP_MAX_MESSAGE_SIZE` and `FILEBEAT_SYSLOG_UDP_MAX_MESSAGE_SIZE` - defines the maximum message size of the message received over TCP and/or UDP, respectively (default: `10KiB` for UDP, `20MiB` for TCP)
         + `FILEBEAT_SYSLOG_TCP_MAX_CONNECTIONS` - specifies the maximum current number of TCP connections for syslog messages
         + `FILEBEAT_SYSLOG_TCP_SSL` - if set to `true`, syslog messages over TCP will require the use of TLS. When [`./scripts/auth_setup`](authsetup.md#AuthSetup) is run, self-signed certificates are generated which may be used by remote log forwarders. Located in the `filebeat/certs/` directory, the certificate authority and client certificate and key files should be copied to the host on which the forwarder is running and used when defining its settings for connecting to Malcolm.
+* **`filescan.env`**, **`filescan-secret.env`**, and **`pipeline.env`** - Settings related to [scanning of automatically-extracted files observed in traffic](file-scanning.md#ZeekFileExtraction) using [Strelka](https://target.github.io/strelka/#/) (see also **`zeek.env`** below)
+    - `CLAMD_…` - variables used to managed the [ClamAV](https://www.clamav.net/) server to which Strelka can submit files for scanning
+    - `FILESCAN_HTTP_SERVER_ENABLE` – if set to `true`, the directory containing [Zeek-extracted files](file-scanning.md#ZeekFileExtraction) will be served over HTTP at `./extracted-files/` (e.g., **https://localhost/extracted-files/** if connecting locally)
+    - `FILESCAN_HTTP_SERVER_KEY` – specifies the password for the ZIP archive if `FILESCAN_HTTP_SERVER_ZIP` is `true`; otherwise, this specifies the decryption password for encrypted Zeek-extracted files in an `openssl enc`-compatible format (e.g., `openssl enc -aes-256-cbc -d -in example.exe.encrypted -out example.exe`)
+    - `FILESCAN_HTTP_SERVER_ZIP` – if to `true`, the Zeek-extracted files will be archived in a ZIP file upon download
+    - `FILESCAN_PRESERVATION` – determines behavior for preservation of [Zeek-extracted files](file-scanning.md#ZeekFileExtraction)
+    - `FILESCAN_PRUNE_INTERVAL_SECONDS` - the interval between checking the prune conditions, in seconds (default `300`)
+    - `FILESCAN_PRUNE_THRESHOLD_MAX_SIZE` - specifies the maximum size, specified either in gigabytes or as a human-readable data size (e.g., `250G`), that the  `./zeek-logs/extract_files/` directory is allowed to contain before the prune condition triggers
+    - `FILESCAN_PRUNE_THRESHOLD_TOTAL_DISK_USAGE_PERCENT` - specifies a maximum fill percentage for the file system containing the `./zeek-logs/extract_files/`; in other words, if the disk is more than this percentage utilized, the prune condition triggers
+    - `PIPELINE_DISABLED` - if set to `true`, file scanning with Strelka will be disabled
+    - `RULES_UPDATE_ENABLED` – if set to `true`, file scanner engines (e.g., ClamAV, YARA, etc.) will periodically update their rule definitions (default `false`)
+    - `STRELKA_BACKEND_PROCS` - specifies the number of Strelka backend instances performing file scanning concurrently (default `1`)
+    - `YARA_CUSTOM_RULES_ONLY` - if set to `true`, Malcolm will bypass its default YARA rulesets and use only [user-defined rules](custom-rules.md#YARA) in `./yara/rules` (default `false`)
 * **`keycloak.env`** - settings specific to [Keycloak](https://www.keycloak.org/)
     - The following variables are used for all [Keycloak](authsetup.md#AuthKeycloak) configurations, be it Malcolm's [embedded instance](authsetup.md#AuthKeycloakEmbedded) or a [remote instance](authsetup.md#AuthKeycloakRemote) (see `NGINX_AUTH_MODE` above):
         + `KEYCLOAK_AUTH_REALM` - specifies the name of the Keycloak [realm](https://www.keycloak.org/docs/latest/server_admin/index.html#_configuring-realms) (default [`master`](https://www.keycloak.org/docs/latest/server_admin/index.html#the-master-realm))
@@ -103,8 +114,8 @@ Although the configuration script automates many of the following configuration 
     - `NGINX_X_FORWARDED_PROTO_OVERRIDE`
     - The following variables control nginx's [resolver directive](https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver). Note that these settings do not affect Malcolm's ability to capture or inspect IPv4/IPv6 traffic: they are only used if and when nginx itself needs to resolve hostnames in the network in which Malcolm resides.
         + `NGINX_RESOLVER_OVERRIDE` - if set, overrides automatic detection of the resolver address used (default is unset)
-        + `NGINX_RESOLVER_IPV4_OFF` - if `true`, sets the `ipv4=off` parameter in the resolver directive (default is `false`)
-        + `NGINX_RESOLVER_IPV6_OFF` - if `true`, sets the `ipv6=off` parameter in the resolver directive; it is recommended to set this to `true` if your network does not support IPv6 (default is `false`)
+        + `NGINX_RESOLVER_IPV4` - if `false`, sets the `ipv4=off` parameter in the resolver directive (default is `true`)
+        + `NGINX_RESOLVER_IPV6` - if `false`, sets the `ipv6=off` parameter in the resolver directive; it is recommended to set this to `false` if your network does not support IPv6 (default is `true`)
 * **`opensearch.env`** - settings specific to [OpenSearch](https://opensearch.org/)
     - `OPENSEARCH_JAVA_OPTS` - one of OpenSearch's most [important settings](https://opensearch.org/docs/latest/install-and-configure/install-opensearch/index/#important-settings), the `-Xmx` and `-Xms` values set the size of OpenSearch's Java heap (we recommend setting this value to half of system RAM, up to 32 gigabytes)
     - `OPENSEARCH_PRIMARY` - one of `opensearch-local`, `opensearch-remote`, or `elasticsearch-remote`, to determine the [OpenSearch or Elasticsearch instance](opensearch-instances.md#OpenSearchInstance) Malcolm will use  (default `opensearch-local`)
@@ -119,7 +130,7 @@ Although the configuration script automates many of the following configuration 
         + `MALCOLM_NETWORK_INDEX_SUFFIX` - Suffix used to create index to which network traffic logs are written
             * supports [Ruby `strftime`](https://docs.ruby-lang.org/en/3.2/strftime_formatting_rdoc.html) strings in `％{}`) (e.g., hourly: `％{％y％m％dh％H}`, twice daily: `％{％P％y％m％d}`, daily (default): `％{％y％m％d}`, weekly: `％{％yw％U}`, monthly: `％{％ym％m}`
             * supports expanding dot-delimited field names in `｛｛ ｝｝` (e.g., `｛｛event.provider｝｝％{％y％m％d}`)
-    - The following variables control the OpenSearch indices to which other logs ([third-party logs](third-party-logs.md#ThirdPartyLogs), resource utilization reports from network sensors, etc.) are written.
+    - The following variables control the OpenSearch indices to which other logs ([third-party logs](third-party-logs.md), resource utilization reports from network sensors, etc.) are written.
         + `MALCOLM_OTHER_INDEX_PATTERN` - Index pattern for other logs written via Logstash (default is `malcolm_beats_*`)
         + `MALCOLM_OTHER_INDEX_TIME_FIELD` - Default time field to use for other logs in Logstash and Dashboards (default is `@timestamp`)
         + `MALCOLM_OTHER_INDEX_SUFFIX` - Suffix used to create index to which other logs are written (with the same rules as `MALCOLM_NETWORK_INDEX_SUFFIX` above) (default is `％{％y％m％d}`)
@@ -147,6 +158,7 @@ Although the configuration script automates many of the following configuration 
     - `SURICATA_LIVE_CAPTURE` - if set to `true`, Suricata will monitor live traffic on the local interface(s) defined by `PCAP_FILTER`
     - `SURICATA_ROTATED_PCAP` - if set to `true`, Suricata can analyze PCAP files captured by `netsniff-ng` or `tcpdump` (see `PCAP_ENABLE_NETSNIFF` and `PCAP_ENABLE_TCPDUMP`, as well as `SURICATA_AUTO_ANALYZE_PCAP_FILES`); if `SURICATA_LIVE_CAPTURE` is `true`, this should be `false`; otherwise Suricata will see duplicate traffic
     - `SURICATA_DISABLE_ICS_ALL` - if set to `true`, this variable can be used to disable Malcolm's [built-in Suricata rules for Operational Technology/Industrial Control Systems (OT/ICS) vulnerabilities and exploits]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/suricata/rules-default/OT)
+    - `SURICATA_DISABLE_SIDS` - may be set to a comma-separated list of entries (e.g., rule sids) with which to populate Suricata's [`disable.conf`](https://docs.suricata.io/en/latest/rule-management/suricata-update.html#controlling-which-rules-are-used)
     - `SURICATA_STATS_ENABLED`, `SURICATA_STATS_EVE_ENABLED`, and `SURICATA_STATS_INTERVAL` - these variables control the generation of [live traffic capture](live-analysis.md#LocalPCAP) statistics for [Suricata](https://docs.suricata.io/en/latest/configuration/suricata-yaml.html#stats), which data is used to populate the **Packet Capture Statistics** dashboard
     - See [**Tuning Suricata**](live-analysis.md#LiveAnalysisTuningSuricata) for other variables related to managing Suricata's performance and resource utilization.    
 * **`upload-common.env`** - settings for dealing with PCAP files [uploaded](upload.md#Upload) to Malcolm for analysis
@@ -155,29 +167,19 @@ Although the configuration script automates many of the following configuration 
     - `PCAP_NODE_NAME` - specifies the node name to associate with network traffic metadata
     - `PCAP_UPLOAD_MAX_FILE_GB` - specifies the maximum uploadable file size in whole gigabytes (default `50`)
 * **`zeek.env`**, **`zeek-secret.env`**, **`zeek-live.env`** and **`zeek-offline.env`** - settings for [Zeek](https://www.zeek.org/index.html) and for scanning [extracted files](file-scanning.md#ZeekFileExtraction) Zeek observes in network traffic
-    - `EXTRACTED_FILE_CAPA_VERBOSE` – if set to `true`, all Capa rule hits will be logged; otherwise (`false`) only [MITRE ATT&CK® technique](https://attack.mitre.org/techniques) classifications will be logged
-    - `EXTRACTED_FILE_ENABLE_CAPA` – if set to `true`, [Zeek-extracted files](file-scanning.md#ZeekFileExtraction) determined to be PE (portable executable) files will be scanned with [Capa](https://github.com/fireeye/capa)
-    - `EXTRACTED_FILE_ENABLE_CLAMAV` – if set to `true`, [Zeek-extracted files](file-scanning.md#ZeekFileExtraction) will be scanned with [ClamAV](https://www.clamav.net/)
-    - `EXTRACTED_FILE_ENABLE_YARA` – if set to `true`, [Zeek-extracted files](file-scanning.md#ZeekFileExtraction) will be scanned with [Yara](https://github.com/VirusTotal/yara)
-    - `EXTRACTED_FILE_HTTP_SERVER_ENABLE` – if set to `true`, the directory containing [Zeek-extracted files](file-scanning.md#ZeekFileExtraction) will be served over HTTP at `./extracted-files/` (e.g., **https://localhost/extracted-files/** if connecting locally)
-    - `EXTRACTED_FILE_HTTP_SERVER_ZIP` – if to `true`, the Zeek-extracted files will be archived in a ZIP file upon download
-    - `EXTRACTED_FILE_HTTP_SERVER_KEY` – specifies the password for the ZIP archive if `EXTRACTED_FILE_HTTP_SERVER_ZIP` is `true`; otherwise, this specifies the decryption password for encrypted Zeek-extracted files in an `openssl enc`-compatible format (e.g., `openssl enc -aes-256-cbc -d -in example.exe.encrypted -out example.exe`)
-    - `EXTRACTED_FILE_IGNORE_EXISTING` – if set to `true`, files extant in `./zeek-logs/extract_files/`  directory will be ignored on startup rather than scanned
-    - `EXTRACTED_FILE_PRESERVATION` – determines behavior for preservation of [Zeek-extracted files](file-scanning.md#ZeekFileExtraction)
-    - `EXTRACTED_FILE_UPDATE_RULES` – if set to `true`, file scanner engines (e.g., ClamAV, Capa, Yara) will periodically update their rule definitions (default `false`)
-    - `EXTRACTED_FILE_YARA_CUSTOM_ONLY` – if set to `true`, Malcolm will bypass the default Yara rulesets ([Neo23x0/signature-base](https://github.com/Neo23x0/signature-base), [reversinglabs/reversinglabs-yara-rules](https://github.com/reversinglabs/reversinglabs-yara-rules), and [bartblaze/Yara-rules](https://github.com/bartblaze/Yara-rules)) and use only [user-defined rules](custom-rules.md#YARA) in `./yara/rules`
-    - `VTOT_API2_KEY` – used to specify a [VirusTotal Public API v.20](https://www.virustotal.com/en/documentation/public-api/) key, which, if specified, will be used to submit hashes of [Zeek-extracted files](file-scanning.md#ZeekFileExtraction) to VirusTotal
     - `ZEEK_AUTO_ANALYZE_PCAP_FILES` – if set to `true`, all PCAP files imported into Malcolm will automatically be analyzed by Zeek, and the resulting logs will also be imported (default `false`)
     - `ZEEK_AUTO_ANALYZE_PCAP_THREADS` – the number of threads available to Malcolm for analyzing Zeek logs (default `1`)
     - `ZEEK_JSON` - whether Zeek should generate [JSON format logs](https://docs.zeek.org/en/master/log-formats.html#zeek-json-format-logs) (`true`) or [TSV format logs](https://docs.zeek.org/en/master/log-formats.html#zeek-tsv-format-logs) (`false`)
     - `ZEEK_DISABLE_…` - if set to `true`, each of these variables can be used to disable a certain Zeek function when it analyzes PCAP files (for example, setting `ZEEK_DISABLE_LOG_PASSWORDS` to `true` to disable logging of cleartext passwords)
     - `ZEEK_…_PORTS` - used to specify non-default ports to register certain Zeek analyzers (e.g., `ZEEK_SYNCHROPHASOR_PORTS` for the [ICSNPP-Synchrophasor analyzer](https://github.com/cisagov/icsnpp-synchrophasor/), `ZEEK_GENISYS_PORTS` for the [ICSNPP-Genisys analyzer](https://github.com/cisagov/icsnpp-genisys/), and `ZEEK_ENIP_PORTS` for the [ICSNPP-Ethernet/IP analyzer](https://github.com/cisagov/icsnpp-enip/)) formatted as a comma-separated list of [Zeek ports](https://docs.zeek.org/en/master/scripting/basics.html#port) (e.g., `12345/tcp` or `4041/tcp,4042/udp`)
+    - `ZEEK_DISABLE_INTEL_OFFLINE`/`ZEEK_DISABLE_INTEL_LIVE` - if set to `true`, Zeek will not `@load` the files under `./zeek/intel` as described in [**Zeek Intelligence Framework**](zeek-intel.md#ZeekIntel) for historical PCAP processing/live traffic capture, respectively
     - `ZEEK_DISABLE_ICS_ALL` and `ZEEK_DISABLE_ICS_…` - if set to `true`, these variables can be used to disable Zeek's protocol analyzers for Operational Technology/Industrial Control Systems (OT/ICS) protocols
     - `ZEEK_DISABLE_BEST_GUESS_ICS` - see ["Best Guess" Fingerprinting for ICS Protocols](ics-best-guess.md#ICSBestGuess)
     - `ZEEK_EXTRACTOR_MODE` – determines the file extraction behavior for file transfers detected by Zeek; see [Automatic file extraction and scanning](file-scanning.md#ZeekFileExtraction) for more details
-    - `ZEEK_INTEL_FEED_SINCE` - when querying a [TAXII](zeek-intel.md#ZeekIntelSTIX), [MISP](zeek-intel.md#ZeekIntelMISP), [Google](zeek-intel.md#ZeekIntelGoogle), or [Mandiant](zeek-intel.md#ZeekIntelMandiant) threat intelligence feed, only process threat indicators created or modified since the time represented by this value; it may be either a fixed date/time (`01/01/2025`) or relative interval (`7 days ago`). Note that this value can be overridden per-feed by adding a `since:` value to each feed's respective configuration YAML file.
+    - `ZEEK_INTEL_FEED_SINCE` - when querying a [TAXII](zeek-intel.md#ZeekIntelSTIX), [MISP](zeek-intel.md#ZeekIntelMISP), [Google](zeek-intel.md#ZeekIntelGoogle), or [Mandiant](zeek-intel.md#ZeekIntelMandiant) threat intelligence feed, only process threat indicators created or modified since the time represented by this value; it may be either a fixed date/time (`01/01/2025`) or relative interval (`24 hours ago`). Note that this value can be overridden per-feed by adding a `since:` value to each feed's respective configuration YAML file.
     - `ZEEK_INTEL_ITEM_EXPIRATION` - specifies the value for Zeek's [`Intel::item_expiration`](https://docs.zeek.org/en/current/scripts/base/frameworks/intel/main.zeek.html#id-Intel::item_expiration) timeout as used by the [Zeek Intelligence Framework](zeek-intel.md#ZeekIntel) (default `-1min`, which disables item expiration)
-    - `ZEEK_INTEL_REFRESH_CRON_EXPRESSION` - Specifies a [cron expression](https://en.wikipedia.org/wiki/Cron#CRON_expression) (using [`cronexpr`](https://github.com/aptible/supercronic/tree/master/cronexpr#implementation)-compatible syntax) indicating the refresh interval for generating the [Zeek Intelligence Framework](zeek-intel.md#ZeekIntel) files (defaults to empty, which disables automatic refresh)
+    - `ZEEK_INTEL_REFRESH_CRON_EXPRESSION` - specifies a [cron expression](https://en.wikipedia.org/wiki/Cron#CRON_expression) (using [`cronexpr`](https://github.com/aptible/supercronic/tree/master/cronexpr#implementation)-compatible syntax) indicating the refresh interval for generating the [Zeek Intelligence Framework](zeek-intel.md#ZeekIntel) files (defaults to empty, which disables automatic refresh)
+    - `ZEEK_INTEL_REFRESH_ON_STARTUP` - if set to `true`, Zeek intelligence framework filess will be refreshed upon startup
     - `ZEEK_JA4SSH_PACKET_COUNT` - the Zeek [JA4+ plugin](https://github.com/FoxIO-LLC/ja4) calculates the JA4SSH value once for every *x* SSH packets; *x* is set here (default `200`)
     - The following variables configure Malcolm's use of the [zeek-long-connections](https://github.com/corelight/zeek-long-connections) plugin:
         + `ZEEK_LONG_CONN_DURATIONS` - a comma-separated list of durations, in seconds, at which point "long connections" will be logged (default `300,600,1800,3600,43200,86400`)
@@ -195,22 +197,83 @@ Although the configuration script automates many of the following configuration 
 The `./scripts/configure` script can also be run noninteractively which can be useful for scripting Malcolm setup. This behavior can be selected by supplying the `-d` or `--defaults` option on the command line. Running with the `--help` option will list the arguments accepted by the script:
 
 ```
-$ ./scripts/configure --help
-usage: configure <arguments>
+usage: configure [-h] [--debug [true|false]] [--quiet] [--configure [true|false]] [--dry-run] [--log-to-file [filename]] [--skip-splash] [--tui | --dui | --gui | --non-interactive] [--compose-file <string>] [--environment-dir-input <string>] [--environment-dir-output <string>]
+                 [--export-malcolm-config-file [<path>]] [--import-malcolm-config-file <path> | --load-existing-env [true|false] | --defaults] [--malcolm-file <string>] [--image-file <string>] [--extra [EXTRASETTINGS ...]]
 
-Malcolm install script
+Malcolm Installer
 
 options:
-  -v [true|false], --verbose [true|false]
-                        Verbose output
-  -d [true|false], --defaults [true|false]
-                        Accept defaults to prompts without user interaction
-  -c [true|false], --configure [true|false]
-                        Only do configuration (not installation)
+  -h, --help            show this help message and exit
+
+Installer Options:
+  --debug, --verbose [true|false]
+                        Enable debug output including tracebacks and debug utilities
+  --quiet, --silent     Suppress console logging output during installation
+  --configure, -c [true|false]
+                        Only write configuration and ancillary files; skip installation steps
+  --dry-run             Log planned actions without writing files or making system changes
+  --log-to-file [filename]
+                        Log output to file. If no filename provided, creates timestamped log file.
+  --skip-splash         Skip the splash screen prompt on startup
+
+Interface Mode (mutually exclusive):
+  --tui                 Run in command-line text-based interface mode (default)
+  --dui                 Run in python dialogs text-based user interface mode (if available - requires python dialogs)
+  --gui                 Run in graphical user interface mode (if available - requires customtkinter)
+  --non-interactive     Run in non-interactive mode for unattended installations (suppresses all user prompts)
+
+Configuration File Options:
+  --compose-file, --configure-file, --kube-file, -f <string>
+                        Path to docker-compose.yml (for compose) or kubeconfig (for Kubernetes)
+
+Environment Config Options:
+  --environment-dir-input <string>
+                        Input directory containing Malcolm's .env and .env.example files
+  --environment-dir-output, -e <string>
+                        Target directory for writing Malcolm's .env files
+  --export-malcolm-config-file, --export-mc-file [<path>]
+                        Export configuration to JSON/YAML settings file (auto-generates filename if not specified)
+  --import-malcolm-config-file, --import-mc-file <path>
+                        Import configuration from JSON/YAML settings file
+  --load-existing-env, -l [true|false]
+                        Automatically load provided config/ .env files from the input directory when present. Can be used in conjunction with --environment-dir-input
+  --defaults, -d        Use built-in default configuration values and skip loading from the config directory
+
+Installation Files:
+  --malcolm-file, -m <string>
+                        Malcolm .tar.gz file for installation
+  --image-file, -i <string>
+                        Malcolm container images .tar.xz file for installation
+
+Additional Configuration Options:
+  --extra [EXTRASETTINGS ...]
+                        Extra environment variables to set (e.g., foobar.env:VARIABLE_NAME=value)
 …
 ```
 
-Note that the value for **any** argument not specified on the command line will be reset to its default (as if for a new Malcolm installation) regardless of the setting's current value in the corresponding `.env` file. In other words, users who want to use the `--defaults` option should carefully review all available command-line options and choose all that apply.
+Once Malcolm is configured correctly, the `--export-malcolm-config-file` option can be used to export the configuration to a file that can be used with `--import-malcolm-config-file` to restore it later or transfer it to another Malcolm instance for import.
+
+To modify Malcolm settings programatically in scripting, a tool like [`jq`](https://jqlang.org/) can be used with `--export-malcolm-config-file` and `--import-malcolm-config-file`, as illustrated here:
+```bash
+# export the current configuration to a JSON file without modifying anything in ./config/
+SETTINGS_FILE="$(mktemp --suffix=.json)"
+./scripts/configure --dry-run --non-interactive --export-malcolm-config-file "${SETTINGS_FILE}"
+
+# use JQ To set whatever options in the exported JSON configuration file you wish to change
+JQ_FILE="$(mktemp --suffix=.jq)"
+tee "${JQ_FILE}" >/dev/null <<EOF
+  .configuration.dashboardsDarkMode = true
+  | .configuration.reverseDns = true
+  | .configuration.pcapNodeName = "Engineering Workstation"
+EOF
+jq -f "${JQ_FILE}" "${SETTINGS_FILE}" | sponge "${SETTINGS_FILE}"
+
+# import the modified configuration
+./scripts/configure --non-interactive --import-malcolm-config-file "${SETTINGS_FILE}"
+
+# clean up
+rm -f "${SETTINGS_FILE}" "${JQ_FILE}"
+```
 
 Similarly, [authentication](authsetup.md#AuthSetup)-related settings can also be set noninteractively by using the [command-line arguments](authsetup.md#CommandLineConfig) for `./scripts/auth_setup`.
 
@@ -225,9 +288,7 @@ In instances where Malcolm is deployed with the intention of running indefinitel
     - `LOG_CLEANUP_MINUTES` - specifies the age, in minutes, at which already-processed log files should be deleted
     - `ZIP_CLEANUP_MINUTES` - specifies the age, in minutes, at which the compressed archives containing already-processed log files should be deleted
 * Files [extracted by Zeek](file-scanning.md#ZeekFileExtraction) stored in the `./zeek-logs/extract_files/` directory can be periodically [pruned]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/shared/bin/prune_files.sh) based on the following variables in **`zeek.env`**. If either of the two threshold limits defined here are met, the oldest extracted files will be deleted until the limit is no longer met. Setting either of the threshold limits to `0` disables that check.
-    - `EXTRACTED_FILE_PRUNE_THRESHOLD_MAX_SIZE` - specifies the maximum size, specified either in gigabytes or as a human-readable data size (e.g., `250G`), that the  `./zeek-logs/extract_files/` directory is allowed to contain before the prune condition triggers
-    - `EXTRACTED_FILE_PRUNE_THRESHOLD_TOTAL_DISK_USAGE_PERCENT` - specifies a maximum fill percentage for the file system containing the `./zeek-logs/extract_files/`; in other words, if the disk is more than this percentage utilized, the prune condition triggers
-    - `EXTRACTED_FILE_PRUNE_INTERVAL_SECONDS` - the interval between checking the prune conditions, in seconds (default `300`)
+    - `FILESCAN_PRUNE_THRESHOLD_MAX_SIZE` - specifies the maximum size, specified either in gigabytes or as a human-readable data size (e.g., `250G`), that the  `./zeek-logs/extract_files/` directory is allowed to contain before the prune condition triggers
+    - `FILESCAN_PRUNE_THRESHOLD_TOTAL_DISK_USAGE_PERCENT` - specifies a maximum fill percentage for the file system containing the `./zeek-logs/extract_files/`; in other words, if the disk is more than this percentage utilized, the prune condition triggers
+    - `FILESCAN_PRUNE_INTERVAL_SECONDS` - the interval between checking the prune conditions, in seconds (default `300`)
 * [Index management policies](index-management.md) can be handled via plugins provided as part of the OpenSearch and Elasticsearch platforms, respectively. In addition to those tools, the `OPENSEARCH_INDEX_SIZE_PRUNE_LIMIT` variable in **`dashboards-helper.env`** defines a maximum cumulative that OpenSearch indices are allowed to consume before the oldest indices [are deleted]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/dashboards/scripts/opensearch_index_size_prune.py), specified as either as a human-readable data size (e.g., `250G`) or as a percentage of the total disk size (e.g., `70%`): e.g., a value of `500G` means "delete the oldest OpenSearch indices if the total space consumed by Malcolm's indices exceeds five hundred gigabytes."
-
-Similar settings exist for managing disk usage on [Hedgehog Linux](malcolm-hedgehog-e2e-iso-install.md#HedgehogDiskUsage).

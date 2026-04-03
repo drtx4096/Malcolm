@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2025 Battelle Energy Alliance, LLC.  All rights reserved.
+# Copyright (c) 2026 Battelle Energy Alliance, LLC.  All rights reserved.
 
 import getpass
 import importlib
@@ -13,23 +13,78 @@ import math
 import platform
 import re
 import site
+import ssl
 import string
 import sys
 import time
+import types
 
-import malcolm_utils
-from malcolm_utils import (
+from base64 import b64encode
+from http.client import HTTPSConnection, HTTPConnection
+from urllib.parse import urlparse
+
+# Dynamically create a module named "scripts" which points to this directory
+if "scripts" not in sys.modules:
+    scripts_module = types.ModuleType("scripts")
+    scripts_module.__path__ = [os.path.dirname(os.path.abspath(__file__))]
+    sys.modules["scripts"] = scripts_module
+
+from scripts.malcolm_utils import (
     deep_get,
     eprint,
+    get_main_script_path,
     EscapeAnsi,
     LoadStrIfJson,
     remove_suffix,
     run_process,
+    sizeof_fmt,
     touch,
+    which,
 )
 
 from collections import defaultdict, namedtuple
 from enum import IntEnum, Flag, IntFlag, auto
+from typing import Tuple, List, Optional
+from pathlib import Path
+
+from scripts.malcolm_constants import (
+    DEFAULT_FILESCAN_LOG_DIR,
+    DEFAULT_INDEX_DIR,
+    DEFAULT_INDEX_SNAPSHOT_DIR,
+    DEFAULT_PCAP_DIR,
+    DEFAULT_SURICATA_LOG_DIR,
+    DEFAULT_ZEEK_LOG_DIR,
+    FILEBEAT_SURICATA_LOG_CONTAINER_PATH,
+    FILEBEAT_ZEEK_LOG_CONTAINER_PATH,
+    FILEBEAT_FILESCAN_LOG_PATH,
+    FILESCAN_LOG_CONTAINER_PATH,
+    ImageArchitecture,
+    MALCOLM_VERSION,
+    OPENSEARCH_BACKUP_CONTAINER_PATH,
+    OPENSEARCH_DATA_CONTAINER_PATH,
+    OrchestrationFramework,
+    OrchestrationFrameworksSupported,
+    PCAP_CAPTURE_CONTAINER_PATH,
+    PCAP_DATA_CONTAINER_PATH,
+    PGID_DEFAULT,
+    PLATFORM_LINUX,
+    PLATFORM_LINUX_CENTOS,
+    PLATFORM_LINUX_DEBIAN,
+    PLATFORM_LINUX_FEDORA,
+    PLATFORM_LINUX_UBUNTU,
+    PLATFORM_MAC,
+    PLATFORM_WINDOWS,
+    PROFILE_HEDGEHOG,
+    PROFILE_MALCOLM,
+    PUID_DEFAULT,
+    SettingsFileFormat,
+    SURICATA_LOG_CONTAINER_PATH,
+    UPLOAD_ARTIFACT_CONTAINER_PATH,
+    YAML_VERSION,
+    ZEEK_EXTRACT_FILES_CONTAINER_PATH,
+    ZEEK_LIVE_LOG_CONTAINER_PATH,
+    ZEEK_LOG_UPLOAD_CONTAINER_PATH,
+)
 
 try:
     from pwd import getpwuid
@@ -38,6 +93,58 @@ except ImportError:
 
 Dialog = None
 MainDialog = None
+
+# Reasonable dialog bounds; used to reduce awkward wrapping in python-dialog
+_DIALOG_MIN_WIDTH = 50
+_DIALOG_MAX_WIDTH = 140
+_DIALOG_MIN_HEIGHT = 7
+_DIALOG_MAX_HEIGHT = 30
+
+
+def _dialog_size_for(text: str) -> tuple[int, int]:
+    """Compute a suitable (height, width) for a dialog widget.
+
+    - Width fits the longest line with a small padding.
+    - Height accounts for the number of text lines plus button area.
+    """
+    try:
+        if not isinstance(text, str):
+            text = str(text)
+        lines = text.splitlines() or [""]
+        max_line = max((len(line) for line in lines), default=_DIALOG_MIN_WIDTH)
+        width = max(_DIALOG_MIN_WIDTH, min(max_line + 4, _DIALOG_MAX_WIDTH))
+        # base height for buttons + borders; add per text line beyond the first
+        height = _DIALOG_MIN_HEIGHT + max(0, len(lines) - 1)
+        height = max(_DIALOG_MIN_HEIGHT, min(height, _DIALOG_MAX_HEIGHT))
+        return height, width
+    except Exception:
+        return (_DIALOG_MIN_HEIGHT, _DIALOG_MIN_WIDTH)
+
+
+def _dialog_menu_width_for(choices) -> int:
+    """Compute a suitable dialog width based on menu choices.
+
+    Looks at the lengths of tag and item columns to avoid overlap/truncation
+    in radiolist/checklist widgets.
+    """
+    try:
+        max_tag = 0
+        max_item = 0
+        for ch in choices or []:
+            if not (isinstance(ch, (list, tuple)) and len(ch) == 3):
+                continue
+            tag = str(ch[0])
+            item = str(ch[1]) if ch[1] is not None else ""
+            max_tag = max(max_tag, len(tag))
+            max_item = max(max_item, len(item))
+        # approximate spacing between tag and item columns used by dialog
+        # add an explicit buffer so value column doesn't butt against tag text
+        buffer_spaces = 6
+        width = max_tag + 2 + max_item + 8 + buffer_spaces
+        return max(_DIALOG_MIN_WIDTH, min(width, _DIALOG_MAX_WIDTH))
+    except Exception:
+        return _DIALOG_MIN_WIDTH
+
 
 try:
     from colorama import init as ColoramaInit, Fore, Back, Style
@@ -52,27 +159,21 @@ ScriptPath = os.path.dirname(os.path.realpath(__file__))
 MalcolmPath = os.path.abspath(os.path.join(ScriptPath, os.pardir))
 MalcolmTmpPath = os.path.join(MalcolmPath, '.tmp')
 MalcolmCfgRunOnceFile = os.path.join(MalcolmPath, '.configured')
+MalcolmISOOsInfoFile = os.path.join(MalcolmPath, '.os-info')
 
-###################################################################################################
-PROFILE_KEY = 'MALCOLM_PROFILE'
-PROFILE_MALCOLM = 'malcolm'
-PROFILE_HEDGEHOG = 'hedgehog'
-CONTAINER_RUNTIME_KEY = 'MALCOLM_CONTAINER_RUNTIME'
+# Utility helpers for referring to the root of the Malcolm repository from
+# other helper scripts.
 
-###################################################################################################
-PLATFORM_WINDOWS = "Windows"
-PLATFORM_MAC = "Darwin"
-PLATFORM_LINUX = "Linux"
-PLATFORM_LINUX_CENTOS = 'centos'
-PLATFORM_LINUX_DEBIAN = 'debian'
-PLATFORM_LINUX_FEDORA = 'fedora'
-PLATFORM_LINUX_UBUNTU = 'ubuntu'
-PLATFORM_LINUX_ROCKY = 'rocky'
-PLATFORM_LINUX_ALMA = 'almalinux'
-PLATFORM_LINUX_AMAZON = 'amazon'
 
-###################################################################################################
-YAML_VERSION = (1, 1)
+def GetMalcolmPath():
+    """Return the absolute path to the root of the Malcolm repository."""
+    return MalcolmPath
+
+
+def SetMalcolmPath(val):
+    global MalcolmPath
+    MalcolmPath = val
+    return MalcolmPath
 
 
 class NullRepresenter:
@@ -157,63 +258,119 @@ DOCKER_INSTALL_URLS[PLATFORM_MAC] = [
 DOCKER_COMPOSE_INSTALL_URLS = defaultdict(lambda: 'https://docs.docker.com/compose/install/')
 HOMEBREW_INSTALL_URLS = defaultdict(lambda: 'https://brew.sh/')
 
-
-class OrchestrationFramework(Flag):
-    UNKNOWN = auto()
-    DOCKER_COMPOSE = auto()
-    KUBERNETES = auto()
-
-
-OrchestrationFrameworksSupported = OrchestrationFramework.DOCKER_COMPOSE | OrchestrationFramework.KUBERNETES
+##################################################################################################
 
 
 ##################################################################################################
-def GetMalcolmPath():
-    return MalcolmPath
-
-
-def SetMalcolmPath(val):
-    global MalcolmPath
-    MalcolmPath = val
-    return MalcolmPath
-
-
-##################################################################################################
-def GetPlatformOSRelease():
-    try:
-        return platform.freedesktop_os_release().get('VARIANT_ID', None)
-    except Exception:
-        return None
-
-
-##################################################################################################
-def LocalPathForContainerBindMount(service, dockerComposeContents, containerPath, localBasePath=None):
-    localPath = None
-    if service and dockerComposeContents and containerPath:
-        vols = deep_get(dockerComposeContents, ['services', service, 'volumes'])
+def LocalPathForContainerBindMount(
+    service,
+    docker_compose_contents,
+    container_path,
+    local_base_path=None,
+):
+    local_path = None
+    if service and docker_compose_contents and container_path:
+        vols = deep_get(docker_compose_contents, ['services', service, 'volumes'])
         if (vols is not None) and (len(vols) > 0):
             for vol in vols:
                 if (
                     isinstance(vol, dict)
                     and ('source' in vol)
                     and ('target' in vol)
-                    and (vol['target'] == containerPath)
+                    and (vol['target'] == container_path)
                 ):
-                    if localBasePath and not os.path.isabs(vol['source']):
-                        localPath = os.path.realpath(os.path.join(localBasePath, vol['source']))
+                    if local_base_path and not os.path.isabs(vol['source']):
+                        local_path = os.path.realpath(os.path.join(local_base_path, vol['source']))
                     else:
-                        localPath = vol['source']
+                        local_path = vol['source']
                     break
                 elif isinstance(vol, str):
                     volSplit = vol.split(':')
-                    if (len(volSplit) >= 2) and (volSplit[1] == containerPath):
-                        if localBasePath and not os.path.isabs(volSplit[0]):
-                            localPath = os.path.realpath(os.path.join(localBasePath, volSplit[0]))
+                    if (len(volSplit) >= 2) and (volSplit[1] == container_path):
+                        if local_base_path and not os.path.isabs(volSplit[0]):
+                            local_path = os.path.realpath(os.path.join(local_base_path, volSplit[0]))
                         else:
-                            localPath = volSplit[0]
+                            local_path = volSplit[0]
                         break
+    return local_path
 
-    return localPath
+
+def GetExposedPorts(docker_compose_contents, exclude_ports=None):
+    exclude_ports = exclude_ports or set()
+    host_ports = set()
+
+    for svc in docker_compose_contents.get("services", {}).values():
+        for port_str in svc.get("ports", []):
+            parts = port_str.split(":")
+            if len(parts) == 3:
+                ip, host_port, _ = parts
+                if ip in ("", "0.0.0.0") and host_port not in exclude_ports:
+                    host_ports.add(host_port)
+            elif len(parts) == 2:
+                host_port, _ = parts
+                if host_port not in exclude_ports:
+                    host_ports.add(host_port)
+
+    return sorted(host_ports, key=int)
+
+
+def BuildBoundPathReplacers(
+    pcap_dir=DEFAULT_PCAP_DIR,
+    suricata_log_dir=DEFAULT_SURICATA_LOG_DIR,
+    zeek_log_dir=DEFAULT_ZEEK_LOG_DIR,
+    filescan_log_dir=DEFAULT_FILESCAN_LOG_DIR,
+    index_dir=DEFAULT_INDEX_DIR,
+    index_snapshot_dir=DEFAULT_INDEX_SNAPSHOT_DIR,
+):
+    return (
+        BoundPathReplacer("arkime", PCAP_DATA_CONTAINER_PATH, pcap_dir),
+        BoundPathReplacer("arkime-live", PCAP_DATA_CONTAINER_PATH, pcap_dir),
+        BoundPathReplacer("filebeat", FILEBEAT_SURICATA_LOG_CONTAINER_PATH, suricata_log_dir),
+        BoundPathReplacer("filebeat", FILEBEAT_ZEEK_LOG_CONTAINER_PATH, zeek_log_dir),
+        BoundPathReplacer("filebeat", FILEBEAT_FILESCAN_LOG_PATH, filescan_log_dir),
+        BoundPathReplacer("filescan", FILESCAN_LOG_CONTAINER_PATH, filescan_log_dir),
+        BoundPathReplacer("filescan", ZEEK_EXTRACT_FILES_CONTAINER_PATH, os.path.join(zeek_log_dir, 'extract_files')),
+        BoundPathReplacer("opensearch", OPENSEARCH_BACKUP_CONTAINER_PATH, index_snapshot_dir),
+        BoundPathReplacer("opensearch", OPENSEARCH_DATA_CONTAINER_PATH, index_dir),
+        BoundPathReplacer("pcap-capture", PCAP_CAPTURE_CONTAINER_PATH, os.path.join(pcap_dir, 'upload')),
+        BoundPathReplacer("pcap-monitor", FILEBEAT_ZEEK_LOG_CONTAINER_PATH, zeek_log_dir),
+        BoundPathReplacer("pcap-monitor", PCAP_CAPTURE_CONTAINER_PATH, pcap_dir),
+        BoundPathReplacer("suricata", PCAP_DATA_CONTAINER_PATH, pcap_dir),
+        BoundPathReplacer("suricata", SURICATA_LOG_CONTAINER_PATH, suricata_log_dir),
+        BoundPathReplacer("suricata-live", SURICATA_LOG_CONTAINER_PATH, suricata_log_dir),
+        BoundPathReplacer("upload", UPLOAD_ARTIFACT_CONTAINER_PATH, os.path.join(pcap_dir, 'upload')),
+        BoundPathReplacer("zeek", PCAP_CAPTURE_CONTAINER_PATH, pcap_dir),
+        BoundPathReplacer("zeek", ZEEK_EXTRACT_FILES_CONTAINER_PATH, os.path.join(zeek_log_dir, 'extract_files')),
+        BoundPathReplacer("zeek", ZEEK_LOG_UPLOAD_CONTAINER_PATH, os.path.join(zeek_log_dir, 'upload')),
+        BoundPathReplacer("zeek-live", ZEEK_EXTRACT_FILES_CONTAINER_PATH, os.path.join(zeek_log_dir, 'extract_files')),
+        BoundPathReplacer("zeek-live", ZEEK_LIVE_LOG_CONTAINER_PATH, os.path.join(zeek_log_dir, 'live')),
+    )
+
+
+def RemapBoundPaths(docker_compose_contents: dict, replacements: Tuple[BoundPathReplacer]) -> int:
+    remap_count = 0
+    for replacer in replacements:
+        if (replacer.service in docker_compose_contents['services']) and (
+            'volumes' in docker_compose_contents['services'][replacer.service]
+        ):
+            for vol_idx, vol_val in enumerate(docker_compose_contents['services'][replacer.service]['volumes']):
+                if (
+                    isinstance(vol_val, dict)
+                    and ('source' in vol_val)
+                    and ('target' in vol_val)
+                    and (vol_val['target'] == replacer.target)
+                ):
+                    docker_compose_contents['services'][replacer.service]['volumes'][vol_idx][
+                        'source'
+                    ] = replacer.source
+                    remap_count += 1
+                elif isinstance(vol_val, str) and re.match(fr'^.+:{replacer.target}(:.+)?\s*$', vol_val):
+                    volume_parts = vol_val.strip().split(':')
+                    volume_parts[0] = replacer.source
+                    docker_compose_contents['services'][replacer.service]['volumes'][vol_idx] = ':'.join(volume_parts)
+                    remap_count += 1
+
+    return remap_count
 
 
 ##################################################################################################
@@ -256,12 +413,14 @@ def ParseK8sMemoryToMib(val):
 
 ##################################################################################################
 def GetUidGidFromEnv(configDir=None):
-    configDirToCheck = configDir if configDir and os.path.isdir(configDir) else os.path.join(GetMalcolmPath(), 'config')
-    uidGidDict = defaultdict(str)
+    uidGidDict = {}
+    # default to the IDs for the calling user ...
+    pyPlatform = platform.system()
+    uidGidDict['PUID'] = f'{os.getuid()}' if (pyPlatform != PLATFORM_WINDOWS) else str(PUID_DEFAULT)
+    uidGidDict['PGID'] = f'{os.getgid()}' if (pyPlatform != PLATFORM_WINDOWS) else str(PGID_DEFAULT)
     if dotEnvImported := DotEnvDynamic():
-        pyPlatform = platform.system()
-        uidGidDict['PUID'] = f'{os.getuid()}' if (pyPlatform != PLATFORM_WINDOWS) else '1000'
-        uidGidDict['PGID'] = f'{os.getgid()}' if (pyPlatform != PLATFORM_WINDOWS) else '1000'
+        # ... but prefer the values in process.env
+        configDirToCheck = configDir if configDir and os.path.isdir(configDir) else os.path.join(MalcolmPath, 'config')
         envFileName = os.path.join(configDirToCheck, 'process.env')
         if os.path.isfile(envFileName):
             envValues = dotEnvImported.dotenv_values(envFileName)
@@ -271,6 +430,71 @@ def GetUidGidFromEnv(configDir=None):
                 uidGidDict['PGID'] = envValues['PGID']
 
     return uidGidDict
+
+
+##################################################################################################
+def GetNonRootUidGid(
+    reference_path=None,
+    script_user=getpass.getuser(),
+    script_platform=platform.system(),
+    fallback_uid=PUID_DEFAULT,
+    fallback_gid=PGID_DEFAULT,
+):
+    default_uid = str(fallback_uid)
+    default_gid = str(fallback_gid)
+
+    if (
+        ((script_platform == PLATFORM_LINUX) or (script_platform == PLATFORM_MAC))
+        and (script_user == "root")
+        and reference_path
+        and os.path.exists(reference_path)
+    ):
+        if path_uid := os.stat(reference_path).st_uid:
+            default_uid = str(path_uid)
+        if path_gid := os.stat(reference_path).st_gid:
+            default_gid = str(path_gid)
+
+    uid = default_uid
+    gid = default_gid
+    try:
+        if (script_platform == PLATFORM_LINUX) or (script_platform == PLATFORM_MAC):
+            uid = str(os.getuid())
+            gid = str(os.getgid())
+            if (uid == "0") or (gid == "0"):
+                raise
+    except Exception:
+        uid = default_uid
+        gid = default_gid
+
+    return {
+        'PUID': uid,
+        'PGID': gid,
+    }
+
+
+##################################################################################################
+def GetNonRootMalcolmUserNames():
+
+    def safe_getpwuid_name(val):
+        try:
+            return getpwuid(val).pw_name if getpwuid else None
+        except Exception:
+            return None
+
+    return list(
+        set(
+            [
+                user
+                for user in {
+                    getpass.getuser(),
+                    safe_getpwuid_name(int(GetNonRootUidGid(reference_path=MalcolmPath).get('PUID'))),
+                    os.environ.get("USER"),
+                    os.environ.get("LOGNAME"),
+                }
+                if user and user not in {"root", "0"}
+            ]
+        )
+    )
 
 
 ##################################################################################################
@@ -377,13 +601,16 @@ def YesOrNo(
         if hasExtraLabel := (extraLabel is not None):
             replyMap[Dialog.EXTRA] = Dialog.CANCEL
             replyMap[Dialog.CANCEL] = Dialog.EXTRA
-        reply = MainDialog.yesno(
-            str(question),
-            yes_label=str(yesLabelTmp),
-            no_label=str(extraLabel) if hasExtraLabel else str(noLabelTmp),
-            extra_button=hasExtraLabel,
-            extra_label=str(noLabelTmp) if hasExtraLabel else str(extraLabel),
-        )
+        _h, _w = _dialog_size_for(str(question))
+        kwargs = {
+            "yes_label": str(yesLabelTmp),
+            "no_label": (str(extraLabel) if hasExtraLabel else str(noLabelTmp)),
+            "extra_button": hasExtraLabel,
+            "extra_label": (str(noLabelTmp) if hasExtraLabel else ""),
+            "height": _h,
+            "width": _w,
+        }
+        reply = MainDialog.yesno(str(question), **kwargs)
         reply = replyMap.get(reply, reply)
         if defaultYes:
             reply = 'y' if (reply == Dialog.OK) else ('e' if (reply == Dialog.EXTRA) else 'n')
@@ -459,16 +686,19 @@ def AskForString(
         reply = default
 
     elif (uiMode & UserInterfaceMode.InteractionDialog) and (MainDialog is not None):
-        code, reply = MainDialog.inputbox(
-            str(question),
-            init=(
+        _h, _w = _dialog_size_for(str(question))
+        kwargs = {
+            "init": (
                 default
                 if (default is not None) and (defaultBehavior & UserInputDefaultsBehavior.DefaultsPrompt)
                 else ""
             ),
-            extra_button=(extraLabel is not None),
-            extra_label=str(extraLabel),
-        )
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+            "height": _h,
+            "width": _w,
+        }
+        code, reply = MainDialog.inputbox(str(question), **kwargs)
         if (code == Dialog.CANCEL) or (code == Dialog.ESC):
             raise DialogCanceledException(question)
         elif code == Dialog.EXTRA:
@@ -484,6 +714,120 @@ def AskForString(
         ).strip()
         if (len(reply) == 0) and (default is not None) and (defaultBehavior & UserInputDefaultsBehavior.DefaultsAccept):
             reply = default
+
+    else:
+        raise RuntimeError("No user interfaces available")
+
+    if clearScreen is True:
+        ClearScreen()
+
+    return reply
+
+
+def AskForStrings(
+    prompt,
+    labels,
+    defaults=None,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt,
+    uiMode=UserInterfaceMode.InteractionDialog | UserInterfaceMode.InteractionInput,
+    clearScreen=False,
+    extraLabel=None,
+    visibleInputLength=40,
+    maxInputLength=1024,
+    maxFormHeight=15,
+):
+    global Dialog
+    global MainDialog
+
+    if (defaults is not None) and (
+        (defaultBehavior & UserInputDefaultsBehavior.DefaultsAccept)
+        and (defaultBehavior & UserInputDefaultsBehavior.DefaultsNonInteractive)
+    ):
+        reply = defaults
+
+    elif (uiMode & UserInterfaceMode.InteractionDialog) and (MainDialog is not None):
+        # Compute label alignment
+        label_width = max(len(label) for label in labels) if labels else 0
+        label_col = 1
+        field_col = label_col + label_width + 2  # 2 spaces between label and field
+
+        # Define field sizing
+        field_length = visibleInputLength
+        input_length = maxInputLength
+
+        # Build the form elements
+        elements = [
+            (
+                # label text
+                label,
+                # label position (row, col)
+                i + 1,
+                label_col,
+                # default value or ""
+                (
+                    defaults[i]
+                    if (
+                        defaults
+                        and (defaults[i] is not None)
+                        and (defaultBehavior & UserInputDefaultsBehavior.DefaultsPrompt)
+                    )
+                    else ""
+                ),
+                # field position (row, col)
+                i + 1,
+                field_col,
+                # field length (visible width)
+                visibleInputLength,
+                # input length (max chars)
+                maxInputLength,
+            )
+            for i, label in enumerate(labels)
+        ]
+
+        # Compute dialog width and height dynamically
+        width = field_col + field_length + 5  # padding at the end for borders and breathing room
+        height = len(elements) + 6  # room for prompt and spacing
+        form_height = len(elements)  # show all fields at once (or tweak if too tall)
+
+        kwargs = {
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+            "height": height,
+            "width": width,
+            "form_height": min(form_height, maxFormHeight),
+        }
+
+        code, reply = MainDialog.form(prompt, elements, **kwargs)
+        if (code == Dialog.CANCEL) or (code == Dialog.ESC):
+            raise DialogCanceledException(prompt)
+        elif code == Dialog.EXTRA:
+            raise DialogBackException(prompt)
+        else:
+            reply = [x.strip() for x in reply]
+
+    elif uiMode & UserInterfaceMode.InteractionInput:
+        print(f"\n{prompt}")
+
+        reply = []
+        for i, label in enumerate(labels):
+            default = (
+                defaults[i]
+                if (
+                    defaults
+                    and (defaults[i] is not None)
+                    and (defaultBehavior & UserInputDefaultsBehavior.DefaultsPrompt)
+                )
+                else None
+            )
+            value = str(input(f"\n{label}{f' ({default})' if default  else ''}: ")).strip()
+            if (
+                (len(value) == 0)
+                and (default is not None)
+                and (defaultBehavior & UserInputDefaultsBehavior.DefaultsAccept)
+            ):
+                reply.append(default)
+            else:
+                reply.append(value)
 
     else:
         raise RuntimeError("No user interfaces available")
@@ -514,12 +858,15 @@ def AskForPassword(
         reply = default
 
     elif (uiMode & UserInterfaceMode.InteractionDialog) and (MainDialog is not None):
-        code, reply = MainDialog.passwordbox(
-            str(prompt),
-            insecure=True,
-            extra_button=(extraLabel is not None),
-            extra_label=str(extraLabel),
-        )
+        _h, _w = _dialog_size_for(str(prompt))
+        kwargs = {
+            "insecure": True,
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+            "height": _h,
+            "width": _w,
+        }
+        code, reply = MainDialog.passwordbox(str(prompt), **kwargs)
         if (code == Dialog.CANCEL) or (code == Dialog.ESC):
             raise DialogCanceledException(prompt)
         elif code == Dialog.EXTRA:
@@ -563,12 +910,17 @@ def ChooseOne(
         reply = defaulted[0] if defaulted is not None else ""
 
     elif (uiMode & UserInterfaceMode.InteractionDialog) and (MainDialog is not None):
-        code, reply = MainDialog.radiolist(
-            str(prompt),
-            choices=validChoices,
-            extra_button=(extraLabel is not None),
-            extra_label=str(extraLabel),
-        )
+        _h, _w = _dialog_size_for(str(prompt))
+        _menu_w = _dialog_menu_width_for(validChoices)
+        _w = max(_w, _menu_w)
+        kwargs = {
+            "choices": validChoices,
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+            "height": max(_h, 12),
+            "width": _w,
+        }
+        code, reply = MainDialog.radiolist(str(prompt), **kwargs)
         if code == Dialog.CANCEL or code == Dialog.ESC:
             raise DialogCanceledException(prompt)
         elif code == Dialog.EXTRA:
@@ -632,12 +984,17 @@ def ChooseMultiple(
         reply = defaulted
 
     elif (uiMode & UserInterfaceMode.InteractionDialog) and (MainDialog is not None):
-        code, reply = MainDialog.checklist(
-            str(prompt),
-            choices=validChoices,
-            extra_button=(extraLabel is not None),
-            extra_label=str(extraLabel),
-        )
+        _h, _w = _dialog_size_for(str(prompt))
+        _menu_w = _dialog_menu_width_for(validChoices)
+        _w = max(_w, _menu_w)
+        kwargs = {
+            "choices": validChoices,
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+            "height": max(_h, 12),
+            "width": _w,
+        }
+        code, reply = MainDialog.checklist(str(prompt), **kwargs)
         if code == Dialog.CANCEL or code == Dialog.ESC:
             raise DialogCanceledException(prompt)
         elif code == Dialog.EXTRA:
@@ -705,11 +1062,15 @@ def DisplayMessage(
         reply = True
 
     elif (uiMode & UserInterfaceMode.InteractionDialog) and (MainDialog is not None):
-        code = MainDialog.msgbox(
-            str(message),
-            extra_button=(extraLabel is not None),
-            extra_label=str(extraLabel),
-        )
+        _h, _w = _dialog_size_for(str(message))
+        kwargs = {
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+            "height": _h,
+            "width": _w,
+            "no_collapse": True,
+        }
+        code = MainDialog.msgbox(str(message), **kwargs)
         if (code == Dialog.CANCEL) or (code == Dialog.ESC):
             raise DialogCanceledException(message)
         elif code == Dialog.EXTRA:
@@ -718,7 +1079,7 @@ def DisplayMessage(
             reply = True
 
     else:
-        print(f"\n{message}")
+        print(f"{message}")
         reply = True
 
     if clearScreen is True:
@@ -743,16 +1104,17 @@ def DisplayProgramBox(
     reply = False
 
     if MainDialog is not None:
-        code = MainDialog.programbox(
-            file_path=filePath,
-            file_flags=fileFlags,
-            fd=fileDescriptor,
-            text=text,
-            width=78,
-            height=20,
-            extra_button=(extraLabel is not None),
-            extra_label=str(extraLabel),
-        )
+        kwargs = {
+            "file_path": filePath,
+            "file_flags": fileFlags,
+            "fd": fileDescriptor,
+            "text": text,
+            "width": 78,
+            "height": 20,
+            "extra_button": (extraLabel is not None),
+            "extra_label": (str(extraLabel) if (extraLabel is not None) else ""),
+        }
+        code = MainDialog.programbox(**kwargs)
         if (code == Dialog.CANCEL) or (code == Dialog.ESC):
             raise DialogCanceledException()
         elif code == Dialog.EXTRA:
@@ -777,6 +1139,19 @@ def posInt(value):
         raise ValueError("{} is an invalid positive int value".format(value))
 
     return ivalue
+
+
+###################################################################################################
+def FormatNetBoxSubnetFilter(value):
+    if (not value) or (not isinstance(value, str)) or (not value.strip()):
+        return ""
+
+    stripSpacePattern = re.compile(r'\s+')
+    return ';'.join(
+        f"{k.strip()}:{stripSpacePattern.sub('', v)}"
+        for item in value.split(';')
+        for k, v in [item.split(':', 1) if ':' in item else ('*', item)]
+    )
 
 
 ###################################################################################################
@@ -818,8 +1193,16 @@ def ValidNetBoxSubnetFilter(value):
 DynImports = defaultdict(lambda: None)
 
 
-def DoDynamicImport(importName, pipPkgName, interactive=False, debug=False):
+def DoDynamicImport(
+    importName,
+    pipPkgName,
+    interactive=False,
+    debug=False,
+    silent=True,
+):
     global DynImports
+
+    debug = debug and not silent
 
     # see if we've already imported it
     if not DynImports[importName]:
@@ -837,20 +1220,21 @@ def DoDynamicImport(importName, pipPkgName, interactive=False, debug=False):
         pyPlatform = platform.system()
         pyExec = sys.executable
         pipCmd = "pip3"
-        if not malcolm_utils.which(pipCmd, debug=debug):
+        if not which(pipCmd, debug=debug):
             err, out = run_process([sys.executable, '-m', 'pip', '--version'], debug=debug)
             if out and (err == 0):
                 pipCmd = [sys.executable, '-m', 'pip']
 
-        eprint(f"The {pipPkgName} module is required under Python {platform.python_version()} ({pyExec})")
+        if not silent:
+            eprint(f"The {pipPkgName} module is required under Python {platform.python_version()} ({pyExec})")
 
-        if interactive and malcolm_utils.which(pipCmd, debug=debug):
+        if interactive and which(pipCmd, debug=debug):
             if YesOrNo(f"Importing the {pipPkgName} module failed. Attempt to install via {pipCmd}?"):
                 installCmd = None
 
                 if (pyPlatform == PLATFORM_LINUX) or (pyPlatform == PLATFORM_MAC):
                     # for linux/mac, we're going to try to figure out if this python is owned by root or the script user
-                    if getpass.getuser() == getpwuid(os.stat(pyExec).st_uid).pw_name:
+                    if getpwuid and (getpass.getuser() == getpwuid(os.stat(pyExec).st_uid).pw_name):
                         # we're running a user-owned python, regular pip should work
                         installCmd = [pipCmd, "install", pipPkgName]
                     else:
@@ -862,7 +1246,8 @@ def DoDynamicImport(importName, pipPkgName, interactive=False, debug=False):
 
                 err, out = run_process(installCmd, debug=debug)
                 if err == 0:
-                    eprint(f"Installation of {pipPkgName} module apparently succeeded")
+                    if not silent:
+                        eprint(f"Installation of {pipPkgName} module apparently succeeded")
                     importlib.reload(site)
                     importlib.invalidate_caches()
                     try:
@@ -870,11 +1255,12 @@ def DoDynamicImport(importName, pipPkgName, interactive=False, debug=False):
                         if tmpImport:
                             DynImports[importName] = tmpImport
                     except ImportError as e:
-                        eprint(f"Importing the {importName} module still failed: {e}")
-                else:
+                        if not silent:
+                            eprint(f"Importing the {importName} module still failed: {e}")
+                elif not silent:
                     eprint(f"Installation of {importName} module failed: {out}")
 
-    if not DynImports[importName]:
+    if not DynImports[importName] and not silent:
         eprint(
             "System-wide installation varies by platform and Python configuration. Please consult platform-specific documentation for installing Python modules."
         )
@@ -882,20 +1268,190 @@ def DoDynamicImport(importName, pipPkgName, interactive=False, debug=False):
     return DynImports[importName]
 
 
-def RequestsDynamic(debug=False, forceInteraction=False):
-    return DoDynamicImport("requests", "requests", interactive=forceInteraction, debug=debug)
+def RequestsDynamic(
+    debug=False,
+    forceInteraction=False,
+    silent=True,
+):
+    return DoDynamicImport(
+        "requests",
+        "requests",
+        interactive=forceInteraction,
+        debug=debug,
+        silent=silent,
+    )
 
 
-def YAMLDynamic(debug=False, forceInteraction=False):
-    return DoDynamicImport("ruamel.yaml", "ruamel.yaml", interactive=forceInteraction, debug=debug)
+def YAMLDynamic(
+    debug=False,
+    forceInteraction=False,
+    silent=True,
+):
+    return DoDynamicImport(
+        "ruamel.yaml",
+        "ruamel.yaml",
+        interactive=forceInteraction,
+        debug=debug,
+        silent=silent,
+    )
 
 
-def KubernetesDynamic(verifySsl=False, debug=False, forceInteraction=False):
-    return DoDynamicImport("kubernetes", "kubernetes", interactive=forceInteraction, debug=debug)
+def KubernetesDynamic(
+    verifySsl=False,
+    debug=False,
+    forceInteraction=False,
+    silent=True,
+):
+    return DoDynamicImport(
+        "kubernetes",
+        "kubernetes",
+        interactive=forceInteraction,
+        debug=debug,
+        silent=silent,
+    )
 
 
-def DotEnvDynamic(debug=False, forceInteraction=False):
-    return DoDynamicImport("dotenv", "python-dotenv", interactive=forceInteraction, debug=debug)
+def DotEnvDynamic(
+    debug=False,
+    forceInteraction=False,
+    silent=True,
+):
+    return DoDynamicImport(
+        "dotenv",
+        "python-dotenv",
+        interactive=forceInteraction,
+        debug=debug,
+        silent=silent,
+    )
+
+
+def get_malcolm_dir():
+    """
+    Get the absolute path to the Malcolm installation directory.
+
+    This function is designed to work robustly whether run:
+    - directly from the Malcolm directory
+    - from another directory
+    - with sudo or other elevated privileges
+
+    Returns:
+        str: The absolute path to the Malcolm directory
+    """
+    # First, try using the location of this script
+    try:
+        # Start with the directory containing this script (malcolm_common.py)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Go up one level to the Malcolm root directory if in scripts/
+        if os.path.basename(current_dir) == "scripts":
+            malcolm_dir = os.path.dirname(current_dir)
+        else:
+            malcolm_dir = current_dir
+
+        # Verify this is indeed the Malcolm directory by checking for key files/directories
+        if (
+            os.path.isdir(os.path.join(malcolm_dir, "scripts"))
+            and os.path.isdir(os.path.join(malcolm_dir, "config"))
+            and os.path.isfile(os.path.join(malcolm_dir, "docker-compose.yml"))
+        ):
+            return malcolm_dir
+    except Exception:
+        pass
+
+    # If that didn't work, try using the current working directory
+    try:
+        cwd = os.getcwd()
+        if (
+            os.path.isdir(os.path.join(cwd, "scripts"))
+            and os.path.isdir(os.path.join(cwd, "config"))
+            and os.path.isfile(os.path.join(cwd, "docker-compose.yml"))
+        ):
+            return cwd
+    except Exception:
+        pass
+
+    # If we're running the script directly, try using its location
+    try:
+        script_path = os.path.abspath(sys.argv[0])
+        script_dir = os.path.dirname(script_path)
+
+        # Check if we're running from the scripts directory
+        if os.path.basename(script_dir) == "scripts":
+            possible_malcolm_dir = os.path.dirname(script_dir)
+            if os.path.isdir(os.path.join(possible_malcolm_dir, "config")) and os.path.isfile(
+                os.path.join(possible_malcolm_dir, "docker-compose.yml")
+            ):
+                return possible_malcolm_dir
+    except Exception:
+        pass
+
+    # If all else fails, check if there's an environment variable set
+    if "MALCOLM_DIR" in os.environ:
+        malcolm_dir = os.environ["MALCOLM_DIR"]
+        if (
+            os.path.isdir(malcolm_dir)
+            and os.path.isdir(os.path.join(malcolm_dir, "scripts"))
+            and os.path.isdir(os.path.join(malcolm_dir, "config"))
+        ):
+            return malcolm_dir
+
+    # If we still can't find it, raise an exception
+    raise FileNotFoundError(
+        "Could not locate the Malcolm directory. Please run this script from within "
+        "the Malcolm directory or set the MALCOLM_DIR environment variable."
+    )
+
+
+def get_default_config_dir():
+    """Get the default config directory."""
+    try:
+        return os.path.join(get_malcolm_dir(), "config")
+    except FileNotFoundError:
+        return os.path.join(os.getcwd(), "config")
+
+
+def get_malcolm_version():
+    """Get the Malcolm version from docker-compose.yml, fall back to MALCOLM_VERSION if not found
+
+    Returns:
+        str: The Malcolm version string, or MALCOLM_VERSION if not found
+    """
+
+    def parse_calver(tag):
+        try:
+            return tuple(int(p) for p in tag.split("-", 1)[0].split("+", 1)[0].split(".")[:3])
+        except ValueError:
+            return None
+
+    def get_highest_calver(tags):
+        parsed = [parse_calver(tag) for tag in tags]
+        valid = [p for p in parsed if p is not None]
+        if not valid:
+            return None
+        highest = max(valid)
+        return ".".join(str(x) for x in highest)
+
+    result = MALCOLM_VERSION
+
+    if yamlImported := YAMLDynamic():
+        try:
+            try:
+                compose_file_name = os.path.join(get_malcolm_dir(), "docker-compose.yml")
+            except FileNotFoundError:
+                compose_file_name = os.path.join(os.getcwd(), "docker-compose.yml")
+            if os.path.isfile(compose_file_name):
+                with open(compose_file_name, 'r') as f:
+                    compose_data = yamlImported.YAML(typ='safe', pure=True).load(f)
+                    image_tags = []
+                    for service_name, service_def in compose_data.get("services", {}).items():
+                        image = service_def.get("image")
+                        if image and ":" in image:
+                            image_tags.append(image.rsplit(":", 1)[1])
+                    result = get_highest_calver(image_tags)
+        except Exception as e:
+            eprint(f'Error deciphering docker-compose.yml: {e}')
+
+    return result
 
 
 ###################################################################################################
@@ -907,24 +1463,35 @@ def AuthFileCheck(fileName, allowEmpty=False):
         return False
 
 
-def MalcolmAuthFilesExist(configDir=None):
+def MalcolmAuthFilesExist(configDir=None, run_profile=PROFILE_MALCOLM, auth_method=None):
     configDirToCheck = (
-        configDir if configDir is not None and os.path.isdir(configDir) else os.path.join(GetMalcolmPath(), 'config')
+        configDir if configDir is not None and os.path.isdir(configDir) else os.path.join(MalcolmPath, 'config')
     )
     return (
-        AuthFileCheck(os.path.join(GetMalcolmPath(), os.path.join('nginx', 'htpasswd')))
-        and AuthFileCheck(os.path.join(GetMalcolmPath(), os.path.join('nginx', 'nginx_ldap.conf')), allowEmpty=True)
-        and AuthFileCheck(
-            os.path.join(GetMalcolmPath(), os.path.join('nginx', os.path.join('certs', 'cert.pem'))), allowEmpty=True
+        (
+            (run_profile == PROFILE_HEDGEHOG)
+            or (
+                AuthFileCheck(
+                    os.path.join(MalcolmPath, os.path.join('nginx', 'htpasswd')),
+                    allowEmpty=(auth_method == 'no_authentication'),
+                )
+                and AuthFileCheck(
+                    os.path.join(MalcolmPath, os.path.join('nginx', 'nginx_ldap.conf')),
+                    allowEmpty=(auth_method != 'ldap'),
+                )
+                and AuthFileCheck(
+                    os.path.join(MalcolmPath, os.path.join('nginx', os.path.join('certs', 'cert.pem'))), allowEmpty=True
+                )
+                and AuthFileCheck(
+                    os.path.join(MalcolmPath, os.path.join('nginx', os.path.join('certs', 'key.pem'))), allowEmpty=True
+                )
+                and AuthFileCheck(os.path.join(configDirToCheck, 'netbox-secret.env'))
+                and AuthFileCheck(os.path.join(configDirToCheck, 'postgres.env'))
+                and AuthFileCheck(os.path.join(configDirToCheck, 'auth.env'))
+            )
         )
-        and AuthFileCheck(
-            os.path.join(GetMalcolmPath(), os.path.join('nginx', os.path.join('certs', 'key.pem'))), allowEmpty=True
-        )
-        and AuthFileCheck(os.path.join(configDirToCheck, 'netbox-secret.env'))
-        and AuthFileCheck(os.path.join(configDirToCheck, 'postgres.env'))
         and AuthFileCheck(os.path.join(configDirToCheck, 'redis.env'))
-        and AuthFileCheck(os.path.join(configDirToCheck, 'auth.env'))
-        and AuthFileCheck(os.path.join(GetMalcolmPath(), '.opensearch.primary.curlrc'))
+        and AuthFileCheck(os.path.join(MalcolmPath, '.opensearch.primary.curlrc'))
     )
 
 
@@ -961,9 +1528,37 @@ def LoadYaml(inputFileName):
                 inYaml.emitter.alt_null = None
                 inYaml.preserve_quotes = True
                 inYaml.representer.ignore_aliases = lambda *args: True
-                inYaml.width = 4096
+                inYaml.width = sys.maxsize
                 result = inYaml.load(f)
     return result
+
+
+###################################################################################################
+def LoadYamlOrJson(inputFileName):
+    result = None
+    fmt = SettingsFileFormat.UNKNOWN
+
+    if inputFileName and os.path.isfile(inputFileName):
+        extension = Path(inputFileName).suffix.lower()
+        if extension in [".yml", ".yaml"]:
+            if result := LoadYaml(inputFileName):
+                fmt = SettingsFileFormat.YAML
+        elif extension == ".json":
+            with open(inputFileName, "r") as f:
+                if result := json.load(f):
+                    fmt = SettingsFileFormat.JSON
+        else:
+            # try to auto-detect by parsing content
+            with open(inputFileName, "r") as f:
+                content = f.read().strip()
+                if content.startswith("{"):
+                    if result := json.loads(content):
+                        fmt = SettingsFileFormat.JSON
+            if not result:
+                if result := LoadYaml(inputFileName):
+                    fmt = SettingsFileFormat.YAML
+
+    return result or {}, fmt
 
 
 ###################################################################################################
@@ -990,7 +1585,7 @@ def DumpYaml(data, outputFileName):
                 outYaml.representer.ignore_aliases = lambda *args: True
                 outYaml.representer.add_representer(type(None), NullRepresenter())
                 outYaml.version = YAML_VERSION
-                outYaml.width = 4096
+                outYaml.width = sys.maxsize
                 outYaml.dump(data, outfile)
             # ruamel puts the YAML version header (2 lines) at the top, which docker-compose
             #   doesn't like, so we need to remove it
@@ -1008,10 +1603,61 @@ def DownloadToFile(url, local_filename, debug=False):
     fExists = os.path.isfile(local_filename)
     fSize = os.path.getsize(local_filename)
     if debug:
-        eprint(
-            f"Download of {url} to {local_filename} {'succeeded' if fExists else 'failed'} ({malcolm_utils.sizeof_fmt(fSize)})"
-        )
+        eprint(f"Download of {url} to {local_filename} {'succeeded' if fExists else 'failed'} ({sizeof_fmt(fSize)})")
     return fExists and (fSize > 0)
+
+
+###################################################################################################
+# test a connection to an HTTP/HTTPS server
+def test_http_connection(
+    protocol=None,
+    host=None,
+    port=None,
+    uri=None,
+    url=None,
+    username=None,
+    password=None,
+    ssl_verify="full",
+    user_agent="malcolm",
+):
+    status = 400
+    message = "Connection error"
+
+    # If URL is provided, parse it and override host/port/protocol/uri
+    if url:
+        parsed = urlparse(url)
+        protocol = parsed.scheme
+        host = parsed.hostname
+        port = parsed.port
+        uri = parsed.path.lstrip("/")
+        if port is None:
+            port = 443 if protocol == "https" else 80
+
+    # Set up the connection
+    c = None
+    if protocol.lower() == "https":
+        if (isinstance(ssl_verify, bool) and ssl_verify) or (
+            isinstance(ssl_verify, str) and (ssl_verify.lower() == "full")
+        ):
+            c = HTTPSConnection(host, port=port)
+        else:
+            c = HTTPSConnection(host, port=port, context=ssl._create_unverified_context())
+    elif protocol.lower() == "http":
+        c = HTTPConnection(host, port=port)
+
+    if c:
+        try:
+            headers = {'User-agent': user_agent}
+            if username and password:
+                headers['Authorization'] = 'Basic %s' % b64encode(f"{username}:{password}".encode()).decode("ascii")
+            c.request('GET', f'/{str(uri)}', headers=headers)
+            res = c.getresponse()
+            status = res.status
+            message = res.reason
+        except Exception as e:
+            message = f"Error: {e}"
+
+    return status, message
 
 
 ###################################################################################################
@@ -1039,56 +1685,72 @@ LOG_IGNORE_REGEX = re.compile(
   | \b(d|es)?stats\.json
   | \b1.+GET\s+/\s+.+401.+curl
   | \bGET.+\b302\s+30\b
+  | \d+\s+changes\s+in\s+\d+\s+seconds\.\s+Saving
   | _cat/indices
   | Background\s+saving\s+started
   | Background\s+saving\s+terminated\s+with\s+success
   | branding.*config\s+is\s+not\s+found\s+or\s+invalid
   | but\s+there\s+are\s+no\s+living\s+connections
-  | \d+\s+changes\s+in\s+\d+\s+seconds\.\s+Saving
   | Cleaning\s+registries\s+for\s+queue:
   | Closing\s+because\s+(close_renamed|close_eof|close_inactive)
   | Connecting\s+to\s+backoff
   | Could\s+not\s+assign\s+group.+to\s+remotely-authenticated\s+user.+Group\s+not\s+found
   | curl.+localhost.+GET\s+/api/status\s+200
   | DB\s+saved\s+on\s+disk
+  | \[DEBUG\]\s+PIL\.
   | DEPRECATION
   | descheduling\s+job\s*id
   | DON'T\s+DO\s+IT.*bad\s+idea
   | Error\s+during\s+file\s+comparison:.*no\s+such\s+file
+  | Error\s+while\s+removing\s+state\s+from\s+statestore:\s+resource\s+.*\s+not\s+found
   | eshealth
   | esindices/list
   | executing\s+attempt_(transition|set_replica_count)\s+for
   | failed\s+to\s+get\s+tcp6?\s+stats\s+from\s+/proc
   | Failure\s+no\s+such\s+index\s+\[\.opendistro_security\]
   | Falling\s+back\s+to\s+single\s+shard\s+assignment
+  | Filebeat\s+is\s+unable\s+to\s+load\s+the\s+ingest\s+pipelines\s+
+  | File\s+was\s+truncated\.\s+Reading\s+file\s+from\s+offset\s+0\.
+  | files?\s+(is|are)\s+too\s+small\s+to\s+be\s+ingested
   | Fork\s+CoW\s+for\s+RDB
   | GET\s+/(_cat/health|api/status|sessions2-|arkime_\w+).+HTTP/[\d\.].+\b200\b
   | GET\s+/\s+.+\b200\b.+ELB-HealthChecker
-  | opensearch.*has\s+insecure\s+file\s+permissions
+  | GET\s+/wise/+stats
+  | (group|user)mod:\s+no\s+changes
   | i:\s+pcap:\s+read\s+\d+\s+file
   | Info:\s+checksum:\s+No\s+packets\s+with\s+invalid\s+checksum,\s+assuming\s+checksum\s+offloading\s+is\s+NOT\s+used
   | Info:\s+logopenfile:\s+eve-log\s+output\s+device\s+\(regular\)\s+initialized:\s+eve\.json
   | Info:\s+pcap:\s+(Starting\s+file\s+run|pcap\s+file)
   | Info:\s+unix-socket:
+  | is\s+configured\s+with\s+.pipeline.ecs_compatibility:\s+disabled
   | kube-probe/
+  | (libpng|MuPDF)\s+(warning|error):
   | loaded\s+config\s+'/etc/netbox/config/
-  | LOG:\s+checkpoint\s+(complete|starting)
+  | LOG:\s+checkpoint\s+(complete|starting)\b
+  | No\s+active\s+configuration\s+revision\s+found\s+-\s+falling\s+back\s+to\s+most\s+recent
   | Notice:\s+pcap:\s+read\s+(\d+)\s+file
-  | POST\s+/(arkime_\w+)(/\w+)?/_(d?stat|doc|search).+HTTP/[\d\.].+\b20[01]\b
+  | opensearch.*has\s+insecure\s+file\s+permissions
+  | points\s+to\s+an\s+already\s+known\s+ingest\s+target
+  | (POST|PUT)\s+/(arkime_\w+)(/\w+)?/_(d?stat|doc|search).+HTTP/[\d\.].+\b20[01]\b
   | POST\s+/_bulk\s+HTTP/[\d\.].+\b20[01]\b
   | POST\s+/server/php/\s+HTTP/\d+\.\d+"\s+\d+\s+\d+.*:8443/
+  | POST\s+/wise/+get.+\b200\b
   | POST\s+HTTP/[\d\.].+\b200\b
-  | POST\s+/wise/get.+\b200\b
   | reaped\s+unknown\s+pid
   | redis.*(changes.+seconds.+Saving|Background\s+saving\s+(started|terminated)|DB\s+saved\s+on\s+disk|Fork\s+CoW)
+  | \[redis\.work\]:\s+task\s+completed:\s+task
   | remov(ed|ing)\s+(old\s+file|dead\s+symlink|empty\s+directory)
   | retry\.go.+(send\s+unwait|done$)
   | running\s+full\s+sweep
+  | running\s+without\s+any\s+HTTP\s+authentication\s+checking
   | saved_objects
   | scheduling\s+job\s*id.+opendistro-ism
+  | Some\s+characters\s+could\s+not\s+be\s+decoded
   | SSL/TLS\s+verifications\s+disabled
   | Successfully\s+handled\s+GET\s+request\s+for\s+'/'
+  | Table\s+_SummaryInformation\s+not\s+found
   | Test\s+run\s+complete.*:failed=>0,\s*:errored=>0\b
+  | The\s+directory\s+structure\s+may
   | throttling\s+index
   | unix-socket:.*(pcap-file\.tenant-id\s+not\s+set|Marking\s+current\s+task\s+as\s+done|Resetting\s+engine\s+state)
   | update_mapping
@@ -1096,6 +1758,8 @@ LOG_IGNORE_REGEX = re.compile(
   | use_field_mapping
   | Using\s+geoip\s+database
   | Warning:\s+app-layer-
+  | Warning:\s+Directory\s+has\s+a\s+target
+  | WARNING:\s+This\s+is\s+a\s+development\s+server
   | you\s+may\s+need\s+to\s+run\s+securityadmin
 )
 """,
@@ -1238,3 +1902,444 @@ def ProcessLogLine(line, debug=False):
             return outputStr if coloramaImported else outputStrEscaped
 
     return None
+
+
+##################################################################################################
+def InstallerDisplayMessage(
+    message,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt | UserInputDefaultsBehavior.DefaultsAccept,
+    uiMode=UserInterfaceMode.InteractionInput | UserInterfaceMode.InteractionDialog,
+    extraLabel=None,
+):
+    """
+    Wrapper around DisplayMessage for installation-specific use cases.
+    This provides consistent behavior across TUI and GUI installers.
+    """
+    return DisplayMessage(
+        message,
+        defaultBehavior=defaultBehavior,
+        uiMode=uiMode,
+        extraLabel=extraLabel,
+    )
+
+
+# Add these installer wrapper functions near existing similar functions
+def InstallerYesOrNo(
+    question,
+    default=None,
+    forceInteraction=False,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt | UserInputDefaultsBehavior.DefaultsAccept,
+    uiMode=UserInterfaceMode.InteractionInput | UserInterfaceMode.InteractionDialog,
+    yesLabel='Yes',
+    noLabel='No',
+    extraLabel=None,
+):
+    """
+    Wrapper around YesOrNo for installation-specific use cases.
+    This provides consistent behavior across TUI and GUI installers.
+    """
+    return YesOrNo(
+        question,
+        default=default,
+        defaultBehavior=defaultBehavior,
+        uiMode=uiMode,
+        yesLabel=yesLabel,
+        noLabel=noLabel,
+        extraLabel=extraLabel,
+    )
+
+
+def InstallerAskForString(
+    question,
+    default=None,
+    forceInteraction=False,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt | UserInputDefaultsBehavior.DefaultsAccept,
+    uiMode=UserInterfaceMode.InteractionInput | UserInterfaceMode.InteractionDialog,
+    extraLabel=None,
+):
+    """
+    Wrapper around AskForString for installation-specific use cases.
+    This provides consistent behavior across TUI and GUI installers.
+    """
+    return AskForString(
+        question,
+        default=default,
+        defaultBehavior=defaultBehavior,
+        uiMode=uiMode,
+        extraLabel=extraLabel,
+    )
+
+
+def InstallerAskForPassword(
+    question,
+    default=None,
+    forceInteraction=False,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt | UserInputDefaultsBehavior.DefaultsAccept,
+    uiMode=UserInterfaceMode.InteractionInput | UserInterfaceMode.InteractionDialog,
+    extraLabel=None,
+):
+    """
+    Wrapper for password input, ensuring masked entry.
+    Consistent behavior for TUI (passwordbox) and GUI (passwordbox).
+    """
+    return AskForPassword(
+        question,
+        default=default,
+        defaultBehavior=defaultBehavior,
+        uiMode=uiMode,
+        extraLabel=extraLabel,
+    )
+
+
+def InstallerChooseOne(
+    prompt,
+    choices=[],
+    forceInteraction=False,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt | UserInputDefaultsBehavior.DefaultsAccept,
+    uiMode=UserInterfaceMode.InteractionInput | UserInterfaceMode.InteractionDialog,
+    extraLabel=None,
+):
+    """
+    Wrapper around ChooseOne for installation-specific use cases.
+    This provides consistent behavior across TUI and GUI installers.
+    """
+    return ChooseOne(
+        prompt,
+        choices=choices,
+        defaultBehavior=defaultBehavior,
+        uiMode=uiMode,
+        extraLabel=extraLabel,
+    )
+
+
+def InstallerChooseMultiple(
+    prompt,
+    choices=[],
+    forceInteraction=False,
+    defaultBehavior=UserInputDefaultsBehavior.DefaultsPrompt | UserInputDefaultsBehavior.DefaultsAccept,
+    uiMode=UserInterfaceMode.InteractionInput | UserInterfaceMode.InteractionDialog,
+    extraLabel=None,
+):
+    """
+    Wrapper around ChooseMultiple for installation-specific use cases.
+    This provides consistent behavior across TUI and GUI installers.
+    """
+    return ChooseMultiple(
+        prompt,
+        choices=choices,
+        defaultBehavior=defaultBehavior,
+        uiMode=uiMode,
+        extraLabel=extraLabel,
+    )
+
+
+###################################################################################################
+# System-information helpers (used by installer logic)
+
+
+def _total_memory_bytes() -> int:
+    """Return total physical memory in bytes (Linux/BSD/Darwin portable)."""
+    result = 0  # unknown
+    try:
+        if plat := sys.platform:
+            if plat.startswith('linux'):
+                with open("/proc/meminfo", "r", encoding="utf-8") as meminfo:
+                    for line in meminfo:
+                        if line.startswith("MemTotal:"):
+                            # value is in kB
+                            result = int(line.split()[1]) * 1024
+            elif plat.startswith('darwin') and which('sysctl'):
+                err, out = run_process(['sysctl', '-n', 'hw.memsize'], stderr=False)
+                if (err == 0) and (len(out) > 0):
+                    result = int(out[0].strip())
+    except Exception:
+        pass
+
+    # Fallback that works on many *nix via sysconf
+    if not result and hasattr(os, "sysconf"):
+        try:
+            result = int(os.sysconf('SC_PAGE_SIZE')) * int(os.sysconf('SC_PHYS_PAGES'))
+        except Exception:
+            pass
+
+    return result
+
+
+def total_memory_gb() -> int:
+    """Return total memory in whole GiB (rounded down)."""
+    return max(1, _total_memory_bytes() // (1024**3))
+
+
+def cpu_cores() -> int:
+    """Return logical CPU count, falling back to 1."""
+    cpu_count = os.cpu_count() or 0
+
+    if (not cpu_count) and hasattr(os, "sysconf"):
+        try:
+            cpu_count = int(os.sysconf('SC_NPROCESSORS_ONLN'))
+        except:
+            cpu_count = 0
+
+    if (not cpu_count) and (plat := sys.platform):
+        try:
+            if plat.startswith('linux'):
+                with open('/proc/cpuinfo') as f:
+                    cpu_count = sum(1 for line in f if line.startswith('processor'))
+
+            elif plat.startswith('darwin') and which('sysctl'):
+                err, out = self.run_process(['sysctl', '-n', 'hw.ncpu'], stderr=False)
+                if (err == 0) and (len(out) > 0):
+                    cpu_count = int(out[0].strip())
+        except:
+            cpu_count = 0
+
+    return max(1, cpu_count or 1)
+
+
+def disk_free_bytes(path: str = "/") -> int:
+    """Return free bytes on the filesystem that contains *path*."""
+    try:
+        return shutil.disk_usage(path).free
+    except (OSError, FileNotFoundError):
+        return 0
+
+
+# ------------------------------------------------------------------
+# Heuristic defaults the legacy installer used
+# ------------------------------------------------------------------
+
+
+def suggest_os_memory(total_gb: Optional[int] = None) -> str:
+    """Return OpenSearch heap suggestion (e.g., "24g")."""
+    if total_gb is None:
+        total_gb = total_memory_gb()
+    # Rough rule: half of RAM, capped at 31 GiB, min 4 GiB
+    heap_gb = max(4, min(31, total_gb // 2))
+    return f"{heap_gb}g"
+
+
+def suggest_ls_memory(total_gb: Optional[int] = None) -> str:
+    """Return Logstash heap suggestion (e.g., "3000m"), computed in MB."""
+    if total_gb is None:
+        total_gb = total_memory_gb()
+
+    total_mb = int(total_gb) * 1024
+
+    if total_gb <= 16:
+        heap_mb = total_mb // 8
+    elif total_gb <= 32:
+        heap_mb = total_mb // 6
+    else:
+        heap_mb = total_mb // 4
+
+    # Clamp to [2g, 3g] in MB
+    heap_mb = min(max(heap_mb, 2500), 3 * 1024)
+
+    return f"{heap_mb}m"
+
+
+def suggest_ls_workers(cores: Optional[int] = None) -> int:
+    """Return recommended Logstash per-pipeline worker count."""
+    if cores is None:
+        cores = cpu_cores()
+    # half the logical cores, capped at 3, min 1
+    return max(1, min(3, cores // 2))
+
+
+# ------------------------------------------------------------------
+# Snapshot the system facts at import-time so they're reusable anywhere.
+# ------------------------------------------------------------------
+
+
+# Detect system architecture for container images
+def get_system_image_architecture():
+    """Detect system architecture and return appropriate ImageArchitecture enum."""
+    raw_platform = platform.machine().lower()
+    if raw_platform in ("aarch64", "arm64"):
+        return ImageArchitecture.ARM64
+    else:
+        return ImageArchitecture.AMD64
+
+
+# Platform detection utilities
+
+
+def get_platform_name() -> str:
+    """Determine the current host platform name.
+
+    Returns:
+        Platform name string: 'linux', 'macos', 'windows', or 'unknown'
+    """
+    plat = sys.platform
+    if plat.startswith("linux"):
+        return "linux"
+    elif plat == "darwin":
+        return "macos"
+    elif plat.startswith("win"):
+        return "windows"
+    else:
+        return "unknown"
+
+
+def get_distro_info() -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    distro = None
+    codename = None
+    ubuntu_codename = None
+    release = None
+    plat = get_platform_name()
+
+    if plat == "linux":
+        os_release_info = {}
+
+        # if the distro library can do it for us, prefer that
+        if distro_lib := DoDynamicImport("distro", "distro"):
+            try:
+                distro = distro_lib.id()
+                codename = distro_lib.codename()
+                release = distro_lib.version()
+                os_release_info = distro_lib.os_release_info()
+            except Exception:
+                pass
+
+        # check /etc/os-release values
+        if not os_release_info:
+            if os.path.isfile('/etc/os-release'):
+                with open("/etc/os-release", 'r') as f:
+                    for line in f:
+                        try:
+                            k, v = line.rstrip().split("=", 1)
+                            os_release_info[k.lower()] = v.strip('"')
+                        except Exception:
+                            pass
+
+        if os_release_info:
+            if not distro:
+                if os_release_info.get('id'):
+                    distro = os_release_info['id'].lower().split()[0]
+                elif os_release_info.get('name'):
+                    distro = os_release_info['name'].lower().split()[0]
+
+            if not codename:
+                if os_release_info.get('version_codename'):
+                    codename = os_release_info['version_codename'].lower().split()[0]
+                elif os_release_info.get('codename'):
+                    codename = os_release_info['codename'].lower().split()[0]
+
+            if (not release) and os_release_info.get('version_id'):
+                release = os_release_info['version_id'].lower().split()[0]
+
+            if not ubuntu_codename:
+                if os_release_info.get('ubuntu_version_codename'):
+                    ubuntu_codename = os_release_info['ubuntu_version_codename'].lower().split()[0]
+                elif os_release_info.get('ubuntu_codename'):
+                    ubuntu_codename = os_release_info['ubuntu_codename'].lower().split()[0]
+                elif codename and (distro == PLATFORM_LINUX_UBUNTU):
+                    ubuntu_codename = codename
+
+        # try lsb_release
+        if (not all([distro, codename, release])) and which('lsb_release'):
+            if not distro:
+                err, out = run_process(['lsb_release', '-is'], stderr=False)
+                if (err == 0) and out:
+                    distro = out[0].lower()
+
+            if not codename:
+                err, out = run_process(['lsb_release', '-cs'], stderr=False)
+                if (err == 0) and out:
+                    codename = out[0].lower()
+
+            if not release:
+                err, out = run_process(['lsb_release', '-rs'], stderr=False)
+                if (err == 0) and out:
+                    release = out[0].lower()
+
+        # try release-specific files
+        if not distro:
+            if distro_file := next(
+                (
+                    path
+                    for path in [
+                        '/etc/rocky-release',
+                        '/etc/almalinux-release',
+                        '/etc/centos-release',
+                        '/etc/redhat-release',
+                        '/etc/issue',
+                    ]
+                    if os.path.isfile(path)
+                ),
+                None,
+            ):
+                with open(distro_file, 'r') as f:
+                    distro_vals = f.read().lower().split()
+                    distro_nums = [x for x in distro_vals if x[0].isdigit()]
+                    distro = distro_vals[0]
+                    if (not release) and (len(distro_nums) > 0):
+                        release = distro_nums[0]
+
+    if not distro:
+        distro = plat
+
+    return distro, codename, ubuntu_codename, release
+
+
+def IsMalcolmISOInstalled():
+    result = False
+    if os.path.isfile(MalcolmISOOsInfoFile):
+        os_info = {}
+        with open(MalcolmISOOsInfoFile, 'r') as f:
+            for line in f:
+                try:
+                    k, v = line.rstrip().split("=", 1)
+                    os_info[k.lower()] = v.strip('"')
+                except Exception:
+                    pass
+        result = (os_info.get('variant_id', '').lower() in (PROFILE_HEDGEHOG, PROFILE_MALCOLM)) and any(
+            os_info.get('variant', '').lower().startswith(p) for p in (PROFILE_HEDGEHOG, PROFILE_MALCOLM)
+        )
+
+    return result
+
+
+_rec_puid_pgid = GetUidGidFromEnv()
+if (int(_rec_puid_pgid['PUID']) == 0) or (int(_rec_puid_pgid['PGID']) == 0):
+    _rec_puid_pgid = GetNonRootUidGid(
+        reference_path=get_main_script_path(), fallback_uid=_rec_puid_pgid['PUID'], fallback_gid=_rec_puid_pgid['PGID']
+    )
+_distro_info = get_distro_info()
+
+# Snapshot of system facts and derived recommendations
+SYSTEM_INFO: dict[str, object] = {
+    "image_architecture": get_system_image_architecture(),
+    "total_mem_gb": total_memory_gb(),
+    "cpu_cores": cpu_cores(),
+    "uid": os.getuid(),
+    "gid": os.getgid(),
+    "recommended_nonroot_uid": int(_rec_puid_pgid['PUID']),
+    "recommended_nonroot_gid": int(_rec_puid_pgid['PGID']),
+    "platform": platform.system(),
+    "platform_name": get_platform_name(),
+    "distro": _distro_info[0],
+    "codename": _distro_info[1],
+    "ubuntu_codename": _distro_info[2],
+    "release": _distro_info[3],
+}
+
+# Derived recommendations appended to dict
+SYSTEM_INFO["suggested_os_memory"] = suggest_os_memory(SYSTEM_INFO["total_mem_gb"])
+SYSTEM_INFO["suggested_ls_memory"] = suggest_ls_memory(SYSTEM_INFO["total_mem_gb"])
+SYSTEM_INFO["suggested_ls_workers"] = suggest_ls_workers(SYSTEM_INFO["cpu_cores"])
+SYSTEM_INFO["malcolm_iso_install"] = IsMalcolmISOInstalled()
+
+__all__ = [
+    "SYSTEM_INFO",
+    "get_platform_name",
+    "total_memory_gb",
+    "cpu_cores",
+    "disk_free_bytes",
+    "suggest_os_memory",
+    "suggest_ls_memory",
+    "suggest_ls_workers",
+]
+
+if __name__ == "__main__":
+    print(SYSTEM_INFO)

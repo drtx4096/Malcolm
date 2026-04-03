@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2025 Battelle Energy Alliance, LLC.  All rights reserved.
+# Copyright (c) 2026 Battelle Energy Alliance, LLC.  All rights reserved.
 
 ###################################################################################
 # for setting up a Malcolm demo instance on an Amazon Linux 2023 instance from scratch
@@ -59,9 +59,7 @@ MALCOLM_SETUP_NONINTERACTIVE=${MALCOLM_SETUP_NONINTERACTIVE:-0}
 # variables for env development environments and tools
 ENV_LIST=(
   age
-  bat
   direnv
-  eza
   fd
   fzf
   jq
@@ -224,11 +222,11 @@ function InstallEnvPackages {
 
     if python3 -m pip -V >/dev/null 2>&1; then
       python3 -m pip install --user -U \
-        dateparser==1.2.1 \
-        kubernetes==32.0.1 \
-        python-dotenv==1.1.0 \
+        dateparser==1.2.2 \
+        kubernetes==34.1.0 \
+        python-dotenv==1.2.1 \
         pythondialog==3.5.3 \
-        mmguero==1.4.4
+        mmguero==2.0.3
     fi
   fi
 
@@ -313,64 +311,114 @@ function InstallCommonPackages {
 }
 
 ################################################################################
-# _InstallCroc - schollz/croc: easily and securely send things from one computer to another
+# _InstallTool - generalized GitHub binary installer
+# Usage:
+#   _InstallTool <repo> <binary_name> <asset_pattern_amd64> <asset_pattern_arm64> [--strip N]
+#
+# Examples:
+#   _InstallTool schollz/croc croc \
+#     "croc_{ver}_Linux-64bit.tar.gz" "croc_{ver}_Linux-ARM64.tar.gz" --strip 0
+#
+#   _InstallTool mikefarah/yq yq \
+#     "yq_linux_amd64" "yq_linux_arm64"
+################################################################################
+function _InstallTool {
+  local repo="$1"
+  local bin_name="$2"
+  local amd64_pattern="$3"
+  local arm64_pattern="$4"
+  local strip_components=1
+
+  shift 4
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --strip) strip_components="$2"; shift ;;
+    esac
+    shift
+  done
+
+  local release="$(_GitLatestRelease "$repo")"
+  local dest_dir=/usr/local/bin
+  $SUDO_CMD mkdir -p "$dest_dir"
+  local tmp_dir="$(mktemp -d)"
+
+  local linux_cpu="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+  local arch_pattern=""
+  case "$linux_cpu" in
+    amd64) arch_pattern="$amd64_pattern" ;;
+    arm64) arch_pattern="$arm64_pattern" ;;
+    *) echo "Unsupported architecture: $linux_cpu" >&2; return 1 ;;
+  esac
+
+  arch_pattern="${arch_pattern//\{ver\}/$release}"
+  local url="https://github.com/${repo}/releases/download/${release}/${arch_pattern}"
+
+  # Default binary name = repo basename if omitted or '-'
+  if [[ -z "$bin_name" || "$bin_name" == "-" ]]; then
+    bin_name="$(basename "$repo")"
+  fi
+
+  echo "Installing $bin_name from $url" >&2
+
+  local is_tarball=false
+  [[ "$arch_pattern" =~ \.tar\.gz$|\.tgz$ ]] && is_tarball=true
+
+  if $is_tarball; then
+    if [[ "$strip_components" -eq 0 ]]; then
+      curl -sSL "$url" | tar xzf - -C "$tmp_dir"
+    else
+      curl -sSL "$url" | tar xzf - --strip-components "$strip_components" -C "$tmp_dir"
+    fi
+
+    # Try to locate binary
+    local found_bin
+    found_bin="$(find "$tmp_dir" -type f -executable \( -name "$bin_name" -o -printf "%f\n" \) 2>/dev/null | head -n1)"
+    if [[ -z "$found_bin" ]]; then
+      # fallback: just grab first executable file
+      found_bin="$(find "$tmp_dir" -type f -perm -111 | head -n1)"
+    fi
+    if [[ -z "$found_bin" ]]; then
+      echo "Error: could not detect binary in tarball" >&2
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+
+    $SUDO_CMD cp -f "$found_bin" "$dest_dir/$bin_name"
+  else
+    $SUDO_CMD curl -sSL -o "$dest_dir/$bin_name" "$url"
+  fi
+
+  $SUDO_CMD chmod 755 "$dest_dir/$bin_name"
+  $SUDO_CMD chown root:root "$dest_dir/$bin_name"
+  rm -rf "$tmp_dir"
+}
+
 function _InstallCroc {
-  mkdir -p "$LOCAL_BIN_PATH"
-
-  CROC_RELEASE="$(_GitLatestRelease schollz/croc)"
-  TMP_CLONE_DIR="$(mktemp -d)"
-  if [[ "$LINUX_CPU" == "arm64" ]]; then
-    CROC_URL="https://github.com/schollz/croc/releases/download/${CROC_RELEASE}/croc_${CROC_RELEASE}_Linux-ARM64.tar.gz"
-  elif [[ "$LINUX_CPU" == "amd64" ]]; then
-    CROC_URL="https://github.com/schollz/croc/releases/download/${CROC_RELEASE}/croc_${CROC_RELEASE}_Linux-64bit.tar.gz"
-  else
-    CROC_URL=
-  fi
-  if [[ -n "$CROC_URL" ]]; then
-    curl -sSL "$CROC_URL" | tar xvzf - -C "${TMP_CLONE_DIR}"
-    cp -f "${TMP_CLONE_DIR}"/croc "$LOCAL_BIN_PATH"/croc
-    chmod 755 "$LOCAL_BIN_PATH"/croc
-  fi
-  rm -rf "$TMP_CLONE_DIR"
+  _InstallTool schollz/croc - \
+    "croc_{ver}_Linux-64bit.tar.gz" \
+    "croc_{ver}_Linux-ARM64.tar.gz" --strip 0
 }
-
-################################################################################
-# _InstallYQ - mikefarah/yq: YAML command-line utility
 function _InstallYQ {
-  mkdir -p "$LOCAL_BIN_PATH"
-  YQ_RELEASE="$(_GitLatestRelease mikefarah/yq)"
-  if [[ "$LINUX_CPU" == "arm64" ]]; then
-    YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_RELEASE}/yq_linux_arm64"
-  elif [[ "$LINUX_CPU" == "amd64" ]]; then
-    YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_RELEASE}/yq_linux_amd64"
-  else
-    YQ_URL=
-  fi
-  if [[ -n "$YQ_URL" ]]; then
-    curl -sSL -o "$LOCAL_BIN_PATH"/yq "$YQ_URL"
-    chmod 755 "$LOCAL_BIN_PATH"/yq
-  fi
+  _InstallTool mikefarah/yq - \
+    "yq_linux_amd64" "yq_linux_arm64"
 }
 
-################################################################################
-# _InstallBoringProxy - boringproxy/boringproxy: a reverse proxy and tunnel manager
 function _InstallBoringProxy {
-  mkdir -p "$LOCAL_BIN_PATH"
+  _InstallTool boringproxy/boringproxy - \
+    "boringproxy-linux-x86_64" "boringproxy-linux-arm64"
+}
 
-  BORING_RELEASE="$(_GitLatestRelease boringproxy/boringproxy)"
-  if [[ "$LINUX_CPU" == "arm64" ]]; then
-    BORING_URL="https://github.com/boringproxy/boringproxy/releases/download/${BORING_RELEASE}/boringproxy-linux-arm64"
-  elif [[ "$LINUX_CPU" == "amd64" ]]; then
-    BORING_URL="https://github.com/boringproxy/boringproxy/releases/download/${BORING_RELEASE}/boringproxy-linux-x86_64"
-  else
-    BORING_URL=
-  fi
-  if [[ -n "$BORING_URL" ]]; then
-    curl -sSL -o "${LOCAL_BIN_PATH}"/boringproxy.new "$BORING_URL"
-    chmod 755 "${LOCAL_BIN_PATH}"/boringproxy.new
-    [[ -f "$LOCAL_BIN_PATH"/boringproxy ]] && rm -f "$LOCAL_BIN_PATH"/boringproxy
-    mv "$LOCAL_BIN_PATH"/boringproxy.new "$LOCAL_BIN_PATH"/boringproxy
-  fi
+function _InstallBat {
+  _InstallTool sharkdp/bat - \
+    "bat-{ver}-x86_64-unknown-linux-musl.tar.gz" \
+    "bat-{ver}-aarch64-unknown-linux-musl.tar.gz" --strip 1
+  $SUDO_CMD ln -s -r /usr/local/bin/bat /usr/local/bin/batcat
+}
+
+function _InstallEza {
+  _InstallTool eza-community/eza - \
+    "eza_x86_64-unknown-linux-musl.tar.gz" \
+    "eza_aarch64-unknown-linux-gnu_no_libgit.tar.gz" --strip 1
 }
 
 ################################################################################
@@ -381,6 +429,8 @@ function InstallUserLocalBinaries {
     [[ ! -f "${LOCAL_BIN_PATH}"/croc ]] && _InstallCroc
     [[ ! -f "${LOCAL_BIN_PATH}"/yq ]] && _InstallYQ
     [[ ! -f "${LOCAL_BIN_PATH}"/boringproxy ]] && _InstallBoringProxy
+    [[ ! -f "${LOCAL_BIN_PATH}"/bat ]] && _InstallBat
+    [[ ! -f "${LOCAL_BIN_PATH}"/eza ]] && _InstallEza
   fi
 }
 
@@ -419,25 +469,28 @@ function SystemConfig {
 kernel.dmesg_restrict=0
 
 # the maximum number of open file handles
-fs.file-max=518144
+fs.file-max=2097152
 
 # the maximum number of user inotify watches
 fs.inotify.max_user_watches=131072
 
-# the maximum number of memory map areas a process may have
-vm.max_map_count=262144
-
 # the maximum number of incoming connections
 net.core.somaxconn=65535
+
+# the maximum number of memory map areas a process may have
+vm.max_map_count=524288
 
 # decrease "swappiness" (swapping out runtime memory vs. dropping pages)
 vm.swappiness=1
 
 # the % of system memory fillable with "dirty" pages before flushing
-vm.dirty_background_ratio=40
+vm.dirty_background_ratio=5
 
 # maximum % of dirty system memory before committing everything
-vm.dirty_ratio=80
+vm.dirty_ratio=10
+
+# virtual memory accounting mode: always overcommit, never check
+vm.overcommit_memory=1
 EOT
     fi # sysctl confirmation
   fi # sysctl check
@@ -527,33 +580,35 @@ function InstallMalcolm {
   if [[ $CONFIRMATION =~ ^[Yy] ]]; then
     if _GitClone https://github.com/idaholab/Malcolm "$MALCOLM_PATH"; then
       pushd "$MALCOLM_PATH" >/dev/null 2>&1
-      python3 ./scripts/configure \
-          --defaults \
-          --runtime docker \
-          --malcolm-profile \
-          --restart-malcolm \
-          --auto-arkime \
-          --auto-suricata \
-          --auto-zeek \
-          --zeek-ics \
-          --zeek-ics-best-guess \
-          --auto-oui \
-          --auto-freq \
-          --file-extraction notcommtxt \
-          --file-preservation quarantined \
-          --extracted-file-server \
-          --extracted-file-server-password infected \
-          --extracted-file-server-zip \
-          --extracted-file-capa \
-          --extracted-file-clamav \
-          --extracted-file-yara \
-          --netbox local \
-          --netbox-enrich \
-          --netbox-autopopulate \
-          --netbox-auto-prefixes \
-          --netbox-site-name "$(hostname -s)"
-
-      grep image: docker-compose.yml | awk '{print $2}' | sort -u | xargs -l -r $SUDO_CMD docker pull
+      SETTINGS_FILE="$(mktemp --suffix=.json)"
+      python3 ./scripts/configure --defaults --non-interactive --export-malcolm-config-file "${SETTINGS_FILE}"
+      jq ".configuration.malcolmRestartPolicy = \"unless-stopped\"
+          | .configuration.malcolmProfile = true
+          | .configuration.autoArkime = true
+          | .configuration.autoSuricata = true
+          | .configuration.autoZeek = true
+          | .configuration.malcolmIcs = true
+          | .configuration.zeekICSBestGuess = true
+          | .configuration.autoOui = true
+          | .configuration.autoFreq = true
+          | .configuration.fileCarveMode = \"notcommtxt\"
+          | .configuration.filePreserveMode = \"quarantined\"
+          | .configuration.fileCarveHttpServer = true
+          | .configuration.fileCarveHttpServerZip = true
+          | .configuration.fileCarveHttpServeEncryptKey = \"infected\"
+          | .configuration.pipelineEnabled = true
+          | .configuration.pipelineWorkers = 1
+          | .configuration.netboxMode = \"local\"
+          | .configuration.netboxSiteName = \"$(hostname -s)\"
+          | .configuration.netboxLogstashEnrich = true
+          | .configuration.netboxAutoPopulate = true
+          | .configuration.netboxLogstashAutoCreatePrefix = true
+          | .configuration.runtimeBin = \"docker\"" \
+          "${SETTINGS_FILE}" | sponge "${SETTINGS_FILE}"
+      python3 ./scripts/configure --non-interactive --import-malcolm-config-file "${SETTINGS_FILE}"
+      rm -f "${SETTINGS_FILE}"
+      echo "Pulling Malcolm container images..." >&2
+      ./scripts/github_image_helper.sh "$(./scripts/github_image_helper.sh 99999 2>&1 | grep PullAndTagGithubWorkflowImages | awk '{print $1}')"
       echo "Please run $MALCOLM_PATH/scripts/auth_setup to complete configuration" >&2
       popd >/dev/null 2>&1
     fi
